@@ -20,10 +20,10 @@ a. [https://addons.mozilla.org/en-US/firefox/addon/violentmonkey/](https://addon
 
 b. [https://chromewebstore.google.com/detail/violentmonkey/jinjaccalgkegednnccohejagnlnfdag](https://chromewebstore.google.com/detail/violentmonkey/jinjaccalgkegednnccohejagnlnfdag)
 
-3. After installation, open the extension and click the gear symbol (⚙) in the menu. This goes to the Userscripts page.
+2. After installation, open the extension and click the gear symbol (⚙) in the menu. This goes to the Userscripts page.
 <img width="330" height="217" alt="RdBUQPzZ5h" src="https://github.com/user-attachments/assets/d53c5212-2249-4060-b184-bf5b23d5f9ca" />
 
-4. Navigate to the top left of this page and click "New" and then "New from URL".
+3. Navigate to the top left of this page and click "New" and then "New from URL".
 <img width="443" height="357" alt="firefox_MDecftEzOp" src="https://github.com/user-attachments/assets/f0221cea-246f-4338-a588-34c9102fdf0a" />
 
 Copy and paste the vorsum userscript URL below, hosted on this github repo:
