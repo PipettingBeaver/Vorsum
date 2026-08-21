@@ -2906,7 +2906,7 @@
       imgWrap.style.cssText = 'margin-bottom:12px;display:none';
       if (HOVER_SUMMARY_SCREENSHOT_URL) {
         const img = document.createElement('img');
-        img.alt = 'Hovering a video to reveal the \u2211 button and the summary it produces';
+        img.alt = 'Hovering a video to see a \u2211 button, you can click this for a summary.';
         img.style.cssText = 'max-width:100%;border-radius:4px;display:block';
         img.addEventListener('load', () => (imgWrap.style.display = 'block'));
         img.addEventListener('error', () => (imgWrap.style.display = 'none'));
@@ -2917,7 +2917,7 @@
 
       body.appendChild(
         para(
-          "vorsum drops a \u2211 button on videos you don't have time to watch right now. Hover a video, click \u2211, get a few sentences back - enough to decide whether it's worth coming back to, or enough on its own if it isn't."
+          "vorsum lets you click a \u2211 button on videos you don't have time to watch right now. It's great for clickbait you'd want the conclusions from without investing time. Hover a video, click \u2211, and get a short summary back. Summaries are also cached in vorsum's history."
         )
       );
       body.appendChild(para('One thing before you start: summarizing needs an API key - a free one takes about a minute to set up on the next screen.'));
@@ -2938,7 +2938,7 @@
       function renderDetectLine(found) {
         detectLine.textContent = found
           ? '\u2713 Project Vorapis (or a compatible layout) detected'
-          : '\u26a0 Project Vorapis not detected - vorsum needs it (or a similarly dense YouTube layout) to find videos to summarize';
+          : '\u26a0 Project Vorapis not detected (vorsum works fine with base YouTube as well)';
       }
       if (vorapisDetected()) {
         renderDetectLine(true);
@@ -2956,7 +2956,7 @@
       steps.style.cssText = 'margin:0 0 12px;padding-left:18px';
       const step1 = document.createElement('li');
       step1.style.cssText = 'margin-bottom:4px';
-      step1.textContent = 'Open the link below, click "Create API key," then paste it into the box here.';
+      step1.textContent = 'Open the link below to Google Gemini page, click "Create API key" in the top right, then paste this key into the box below.';
       steps.appendChild(step1);
       body.appendChild(steps);
 
@@ -3152,9 +3152,9 @@
       const list = document.createElement('ul');
       list.style.cssText = 'margin:0 0 12px;padding-left:18px';
       [
-        'Caption Requests: fetches video transcripts from YouTube and passes the text to your chosen LLM (Gemini, Claude, or a local model) for processing.',
-        "Native Video Mode (Gemini): sends only the YouTube URL directly to Google's infrastructure, letting Gemini analyze video audio and visuals natively.",
-        'Advanced Endpoints: custom providers like Claude or local instances (Ollama) can be configured manually if you prefer local or non-Google setups.'
+        '● Caption Requests: fetches video transcripts from YouTube and passes the text to your chosen LLM (Gemini, Claude, or a local model) for processing.',
+        "● Native Video Mode (Gemini): sends only the YouTube URL directly to Google's infrastructure, letting Gemini analyze video audio and visuals natively.",
+        '● Advanced Endpoints: custom providers like Claude or local instances (Ollama) can be configured manually if you prefer local or non-Gemini setups.'
       ].forEach((line) => {
         const li = document.createElement('li');
         li.textContent = line;
