@@ -8,7 +8,7 @@ Here's an example with the base YouTube layout on light mode:
 <img width="533" height="710" alt="image" src="https://github.com/user-attachments/assets/1150f3b2-32a2-417c-ab58-a0b1adbfd2a4" />
 
 
-And here is an example showing Vorapis UI layout on dark mode:
+And here is an example showing compatibility with Vorapis UI layout on dark mode:
 
 <img width="433" height="587" alt="image" src="https://github.com/user-attachments/assets/b234ec7e-30cd-4be0-9b1b-dc8098ee79d8" />
 
