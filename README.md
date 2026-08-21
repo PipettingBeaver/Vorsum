@@ -1,4 +1,4 @@
-"# Vorsum" 
+# Vorsum - ∑ YouTube summary userscript
 
 Vorsum is a summarizer for YouTube that I made since I couldn't find any sleek in-line YouTube summarizers that were quite what I wanted.
 My utility uses free Gemini and YouTube API to make calls for videos for URL-based parsing or captions respectively, and has a built-in tutorial for beginners.
