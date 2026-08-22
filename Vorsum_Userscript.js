@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Vorsum - YouTube Summarize Button
-// @namespace    personal.vorapis.summarize
-// @version      1.0.0
-// @description  Adds an easy to use click-to-summarize button to YouTube grid cards. Two modes: caption-transcript or direct-URL (Gemini watches the video itself). Includes basic customization, and an accessible user tutorial.
+// @name         Vorsum YouTube Summarizer
+// @namespace    //https://github.com/PipettingBeaver/Vorsum
+// @version      1.0.1
+// @description  Adds a click-to-summarize button to YouTube grid cards. It can work via caption-transcript or direct-URL (Gemini) modes. Beginner-friendly with tutorial for setup.
 // @match        https://www.youtube.com/*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_setValue
@@ -16,6 +16,9 @@
 // @connect      api.anthropic.com
 // @connect      api.openai.com
 // @connect      *
+// @connect      raw.githubusercontent.com
+// @updateURL   https://raw.githubusercontent.com/PipettingBeaver/Vorsum/refs/heads/main/Vorsum_Userscript.js
+// @downloadURL https://raw.githubusercontent.com/PipettingBeaver/Vorsum/refs/heads/main/Vorsum_Userscript.js
 // @run-at       document-idle
 // ==/UserScript==
 
@@ -250,10 +253,17 @@
                                    // it doubles as both the card root and the append target
     'li.related-list-item', // VORAPIS watch-page sidebar - both "Up Next" and the
                              // "related" list below it use this per-item wrapper
-    '.ytLockupViewModelMetadata' // vanilla YouTube's current "lockup view model" card -
+    '.ytLockupViewModelMetadata', // vanilla YouTube's current "lockup view model" card -
                                   // self-contained the same way as the homepage shelf
                                   // above (own watch link, title, channel link), so no
                                   // separate thumbnail-side lookup is needed
+    'ytd-video-renderer #dismissible' // vanilla YouTube search results page - an older,
+                                  // separate renderer template from the lockup-view-model
+                                  // one above, so it needed its own entry. Scoped with the
+                                  // ytd-video-renderer ancestor rather than a bare
+                                  // #dismissible, since that id is reused (invalid HTML,
+                                  // but browsers tolerate it) by several unrelated
+                                  // component types elsewhere on the page.
   ].join(',');
 
   const MAX_ATTEMPTS = 3;
@@ -307,6 +317,88 @@
       return '?';
     }
   }
+
+  // ---- Update check ----
+  // @updateURL/@downloadURL (in the header above) is what actually lets
+  // Tampermonkey/Violentmonkey update the script - that happens entirely
+  // in the manager's own UI, on its own schedule, and a lot of people never
+  // notice the little badge for it. This is the second half: vorsum checks
+  // for itself, on its own throttled schedule, and says so somewhere the
+  // person is actually looking - inside its own panel.
+  const REPO_RAW_URL = 'https://raw.githubusercontent.com/PipettingBeaver/Vorsum/refs/heads/main/Vorsum_Userscript.js';
+  const REPO_PAGE_URL = 'https://github.com/PipettingBeaver/Vorsum';
+  const UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000; // once/day - no need for more than that
+  let updateNoticeEl = null;
+  let latestKnownVersion = null;
+
+  // Shown in the main widget (not the onboarding modal) whenever it's open
+  // and literally no provider has a key configured yet - the state where
+  // summarizing genuinely can't work at all, distinct from onboarding's own
+  // "you haven't finished setup" framing. Checks all three provider keys,
+  // not just Gemini's, since someone could have configured only Claude/a
+  // local server for Caption mode and never touched Gemini at all.
+  let noKeyNoticeEl = null;
+  function hasAnyApiKeyConfigured() {
+    return !!(GM_getValue('gemini_api_key', '') || GM_getValue('vorsum_anthropic_key', '') || GM_getValue('vorsum_openai_key', ''));
+  }
+  function renderNoKeyNotice() {
+    if (!noKeyNoticeEl) return;
+    noKeyNoticeEl.style.display = hasAnyApiKeyConfigured() ? 'none' : 'block';
+  }
+
+  // Simple numeric-part comparison (1.2.10 > 1.2.9), not a full semver
+  // parser - fine for this project's plain MAJOR.MINOR.PATCH versioning.
+  function isNewerVersion(a, b) {
+    const pa = String(a).split('.').map((n) => parseInt(n, 10) || 0);
+    const pb = String(b).split('.').map((n) => parseInt(n, 10) || 0);
+    for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+      const da = pa[i] || 0;
+      const db = pb[i] || 0;
+      if (da !== db) return da > db;
+    }
+    return false;
+  }
+
+  function renderUpdateNotice() {
+    if (!updateNoticeEl) return;
+    if (!latestKnownVersion || !isNewerVersion(latestKnownVersion, getVersion())) {
+      updateNoticeEl.style.display = 'none';
+      return;
+    }
+    updateNoticeEl.textContent = `v${latestKnownVersion} available (you're on v${getVersion()}) - click to open the repo`;
+    updateNoticeEl.style.display = 'block';
+  }
+
+  function checkForUpdate(force) {
+    const lastChecked = GM_getValue('vorsum_update_last_checked', 0);
+    if (!force && Date.now() - lastChecked < UPDATE_CHECK_INTERVAL_MS) return;
+    GM_setValue('vorsum_update_last_checked', Date.now());
+
+    GM_xmlhttpRequest({
+      method: 'GET',
+      url: REPO_RAW_URL,
+      timeout: 15000,
+      onload: (res) => {
+        if (res.status < 200 || res.status >= 300) {
+          log(`Update check: HTTP ${res.status}`, 'warn');
+          return;
+        }
+        // Only the @version line is needed - no reason to parse or run the
+        // rest of the fetched file.
+        const match = res.responseText.match(/@version\s+([\d.]+)/);
+        if (!match) {
+          log('Update check: could not find @version in the fetched file', 'warn');
+          return;
+        }
+        latestKnownVersion = match[1];
+        log(`Update check: latest on GitHub is v${latestKnownVersion}, running v${getVersion()}`);
+        renderUpdateNotice();
+      },
+      onerror: () => log('Update check: network error', 'warn'),
+      ontimeout: () => log('Update check: timed out', 'warn')
+    });
+  }
+
 
   // Fill this in once a screenshot is hosted somewhere reachable - e.g.
   // the raw GitHub URL after adding it to this repo's /assets folder
@@ -627,7 +719,7 @@
 
   function renderFullLog() {
     if (!logPanelEl) return;
-    logPanelEl.innerHTML = '';
+    logPanelEl.replaceChildren();
     logBuffer.forEach((entry) => renderLogLine(entry.line, entry.level));
   }
 
@@ -1109,9 +1201,20 @@
   }
 
   function decodeEntities(str) {
-    const el = document.createElement('textarea');
-    el.innerHTML = str;
-    return el.value;
+    // The classic innerHTML-into-a-textarea entity-decode trick is
+    // blocked outright by Trusted Types CSP, which YouTube enforces on
+    // at least some configurations - this was silently throwing on the
+    // XML caption-parsing fallback path whenever it ran on such a page.
+    // Decoding the small set of entities actually used in timedtext XML
+    // by hand instead avoids the sink entirely.
+    return str
+      .replace(/&amp;/g, '&')
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'")
+      .replace(/&#(\d+);/g, (_, code) => String.fromCharCode(parseInt(code, 10)))
+      .replace(/&#x([0-9a-fA-F]+);/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
   }
 
   function extractJsonAfterMarker(html, marker) {
@@ -1659,7 +1762,7 @@
 
   function showCacheWarningNotice(info) {
     if (!cacheWarningNoticeEl) return;
-    cacheWarningNoticeEl.innerHTML = '';
+    cacheWarningNoticeEl.replaceChildren();
 
     const msg = document.createElement('div');
     msg.textContent = `Cache threshold reached (${info.historyCount} summaries, ${formatBytes(info.totalBytes)}). Consider exporting your summaries or clearing older entries.`;
@@ -1717,7 +1820,7 @@
       rateLimitNoticeEl.style.display = 'none';
       return;
     }
-    rateLimitNoticeEl.innerHTML = '';
+    rateLimitNoticeEl.replaceChildren();
     const msg = document.createElement('div');
     msg.textContent =
       "Gemini API limit reached - further attempts are paused for a few minutes to avoid wasting quota. Check aistudio.google.com for your exact quota/reset time.";
@@ -1938,6 +2041,25 @@
       'display:none;padding:5px 6px;font-size:10px !important;border-width:1px;border-style:solid;border-radius:3px';
     rateLimitNoticeEl = rateLimitNotice;
 
+    const updateNotice = document.createElement('div');
+    updateNotice.className = 'vorsum-banner';
+    updateNotice.style.cssText =
+      'display:none;padding:5px 6px;font-size:10px !important;border-width:1px;border-style:solid;border-radius:3px;cursor:pointer;text-align:center';
+    updateNotice.title = 'Open the vorsum repo on GitHub';
+    updateNotice.addEventListener('click', () => window.open(REPO_PAGE_URL, '_blank'));
+    updateNoticeEl = updateNotice;
+
+    const noKeyNotice = document.createElement('div');
+    noKeyNotice.className = 'vorsum-banner';
+    noKeyNotice.style.cssText =
+      'display:none;padding:5px 6px;font-size:10px !important;border-width:1px;border-style:solid;border-radius:3px;cursor:pointer;text-align:center';
+    noKeyNotice.textContent = 'Vorsum features unavailable until key is added';
+    noKeyNotice.title = 'Click to open API key settings';
+    noKeyNotice.addEventListener('click', () => {
+      if (openCaptionProviderSettings) openCaptionProviderSettings();
+    });
+    noKeyNoticeEl = noKeyNotice;
+
     historyOptionsRow.appendChild(historyBtn);
     historyOptionsRow.appendChild(optionsBtn);
 
@@ -2071,6 +2193,7 @@
       if (next) {
         GM_setValue('gemini_api_key', next);
         setOnboarded(true); // a real key now exists somewhere - stop nagging on every load
+        renderNoKeyNotice();
         renderApiKeyValue();
         log('API key updated');
       }
@@ -2246,6 +2369,7 @@
     anthKeyInput.addEventListener('change', () => {
       GM_setValue('vorsum_anthropic_key', anthKeyInput.value);
       if (anthKeyInput.value) setOnboarded(true);
+      renderNoKeyNotice();
       log('Anthropic API key updated');
     });
     anthModelInput.addEventListener('change', () => {
@@ -2255,6 +2379,7 @@
     oaiKeyInput.addEventListener('change', () => {
       GM_setValue('vorsum_openai_key', oaiKeyInput.value);
       if (oaiKeyInput.value) setOnboarded(true);
+      renderNoKeyNotice();
       log('OpenAI-compatible API key updated');
     });
     oaiBaseUrlInput.addEventListener('change', () => {
@@ -2651,7 +2776,7 @@
     async function loadHistory(reset) {
       if (reset) {
         historyOffset = 0;
-        historyList.innerHTML = '';
+        historyList.replaceChildren();
       }
       let entries;
       if (historySearchQuery) {
@@ -2689,7 +2814,7 @@
     clearHistoryBtn.addEventListener('click', async () => {
       if (!confirm('Delete all vorsum summary history? This cannot be undone.')) return;
       await historyClearAll();
-      historyList.innerHTML = '';
+      historyList.replaceChildren();
       log('History: cleared all entries', 'warn');
       loadHistory(true);
     });
@@ -2793,6 +2918,8 @@
     panel.appendChild(historyNotice);
     panel.appendChild(cacheWarningNotice);
     panel.appendChild(rateLimitNotice);
+    panel.appendChild(updateNotice);
+    panel.appendChild(noKeyNotice);
     panel.appendChild(historyPanel);
     panel.appendChild(optionsPanel);
 
@@ -2817,6 +2944,8 @@
 
     renderHistoryNotice();
     renderRateLimitNotice();
+    renderUpdateNotice();
+    renderNoKeyNotice();
     renderFullLog();
     log('Widget initialized');
   }
@@ -2856,9 +2985,11 @@
       if (e.key === 'Escape') close();
     }
     document.addEventListener('keydown', onKeydown);
-    backdrop.addEventListener('click', (e) => {
-      if (e.target === backdrop) close();
-    });
+    // Deliberately NO click-outside-to-close here: a new user with no key
+    // configured yet who accidentally clicks off the modal shouldn't get
+    // silently dropped with no idea how they got stuck or how to get back -
+    // Escape still works (a deliberate keypress), and "Skip for now" below
+    // is the explicit, intentional way out.
 
     // ---- small DOM builder helpers (no innerHTML anywhere - YouTube's
     // Trusted Types CSP has been seen blocking that sink outright, and
@@ -2886,9 +3017,30 @@
     }
 
     function render() {
-      body.innerHTML = ''; // clearing our OWN previously-built nodes, not untrusted content - fine
-      if (screen === 1) renderScreen1();
-      else if (screen === 2) renderScreen2();
+      // replaceChildren() (a real DOM API), not innerHTML='' - Trusted
+      // Types CSP was blocking the innerHTML setter outright on at least
+      // one real setup, which is exactly why this modal was rendering
+      // completely empty: render() threw right here, before anything
+      // below ever got a chance to append.
+      body.replaceChildren();
+      try {
+        if (screen === 1) renderScreen1();
+        else if (screen === 2) renderScreen2();
+      } catch (e) {
+        // A blank modal is the worst possible first impression for someone
+        // who doesn't have an API key yet - if anything unexpected throws
+        // here in the future, fall back to the one link that actually
+        // matters rather than leaving nothing on screen at all.
+        log(`Onboarding render failed: ${e.message}`, 'error');
+        body.replaceChildren();
+        body.appendChild(heading('Welcome to vorsum'));
+        body.appendChild(
+          para('Something went wrong showing the full setup screen. To get started: get a free Gemini API key, then paste it into Options \u2192 API key.')
+        );
+        const fallbackLinkBtn = btn('\ud83d\udd11 Get free Gemini key');
+        fallbackLinkBtn.addEventListener('click', () => window.open('https://aistudio.google.com/app/apikey', '_blank'));
+        body.appendChild(fallbackLinkBtn);
+      }
       registerThemedSubtree(backdrop);
     }
 
@@ -2906,7 +3058,7 @@
       imgWrap.style.cssText = 'margin-bottom:12px;display:none';
       if (HOVER_SUMMARY_SCREENSHOT_URL) {
         const img = document.createElement('img');
-        img.alt = 'Hovering a video to see a \u2211 button, you can click this for a summary.';
+        img.alt = 'Hovering a video to reveal the \u2211 button and the summary it produces';
         img.style.cssText = 'max-width:100%;border-radius:4px;display:block';
         img.addEventListener('load', () => (imgWrap.style.display = 'block'));
         img.addEventListener('error', () => (imgWrap.style.display = 'none'));
@@ -2917,18 +3069,44 @@
 
       body.appendChild(
         para(
-          "vorsum lets you click a \u2211 button on videos you don't have time to watch right now. It's great for clickbait you'd want the conclusions from without investing time. Hover a video, click \u2211, and get a short summary back. Summaries are also cached in vorsum's history."
+          "vorsum drops a \u2211 button on videos you don't have time to watch right now. Hover a video, click \u2211, get a few sentences back - enough to decide whether it's worth coming back to, or enough on its own if it isn't."
         )
       );
       body.appendChild(para('One thing before you start: summarizing needs an API key - a free one takes about a minute to set up on the next screen.'));
 
       const nextRow = document.createElement('div');
-      nextRow.style.cssText = 'display:flex;justify-content:flex-end;margin-top:4px';
+      nextRow.style.cssText = 'display:flex;justify-content:space-between;align-items:center;margin-top:4px';
+
+      // Double-click-to-confirm, same pattern as History's Delete button -
+      // deliberately harder to trigger by accident than a single click,
+      // since this is the one action that leaves setup unfinished.
+      const skipBtn = document.createElement('button');
+      skipBtn.className = 'vorsum-ctrl-btn';
+      skipBtn.textContent = 'Skip for now';
+      skipBtn.style.cssText =
+        'padding:4px 8px;border-width:1px;border-style:solid;border-radius:3px;cursor:pointer;font-size:10px !important';
+      let skipArmed = false;
+      let skipArmTimeout = null;
+      skipBtn.addEventListener('click', () => {
+        if (!skipArmed) {
+          skipArmed = true;
+          skipBtn.textContent = 'Click again to skip';
+          skipArmTimeout = setTimeout(() => {
+            skipArmed = false;
+            skipBtn.textContent = 'Skip for now';
+          }, 3000);
+          return;
+        }
+        clearTimeout(skipArmTimeout);
+        close(); // deliberately does NOT call setOnboarded(true) - reappears until a key exists
+      });
+
       const nextBtn = btn('Set up API key \u2192');
       nextBtn.addEventListener('click', () => {
         screen = 2;
         render();
       });
+      nextRow.appendChild(skipBtn);
       nextRow.appendChild(nextBtn);
       body.appendChild(nextRow);
 
@@ -2938,7 +3116,7 @@
       function renderDetectLine(found) {
         detectLine.textContent = found
           ? '\u2713 Project Vorapis (or a compatible layout) detected'
-          : '\u26a0 Project Vorapis not detected (vorsum works fine with base YouTube as well)';
+          : '\u26a0 Project Vorapis not detected - vorsum needs it (or a similarly dense YouTube layout) to find videos to summarize';
       }
       if (vorapisDetected()) {
         renderDetectLine(true);
@@ -2956,7 +3134,7 @@
       steps.style.cssText = 'margin:0 0 12px;padding-left:18px';
       const step1 = document.createElement('li');
       step1.style.cssText = 'margin-bottom:4px';
-      step1.textContent = 'Open the link below to Google Gemini page, click "Create API key" in the top right, then paste this key into the box below.';
+      step1.textContent = 'Open the link below, click "Create API key," then paste it into the box here.';
       steps.appendChild(step1);
       body.appendChild(steps);
 
@@ -3002,6 +3180,7 @@
         }
         GM_setValue('gemini_api_key', val);
         setOnboarded(true); // populated - stop nagging on future loads
+        renderNoKeyNotice();
         saveBtn.textContent = 'Testing\u2026';
         saveBtn.disabled = true;
         GM_xmlhttpRequest({
@@ -3152,9 +3331,9 @@
       const list = document.createElement('ul');
       list.style.cssText = 'margin:0 0 12px;padding-left:18px';
       [
-        '● Caption Requests: fetches video transcripts from YouTube and passes the text to your chosen LLM (Gemini, Claude, or a local model) for processing.',
-        "● Native Video Mode (Gemini): sends only the YouTube URL directly to Google's infrastructure, letting Gemini analyze video audio and visuals natively.",
-        '● Advanced Endpoints: custom providers like Claude or local instances (Ollama) can be configured manually if you prefer local or non-Gemini setups.'
+        'Caption Requests: fetches video transcripts from YouTube and passes the text to your chosen LLM (Gemini, Claude, or a local model) for processing.',
+        "Native Video Mode (Gemini): sends only the YouTube URL directly to Google's infrastructure, letting Gemini analyze video audio and visuals natively.",
+        'Advanced Endpoints: custom providers like Claude or local instances (Ollama) can be configured manually if you prefer local or non-Google setups.'
       ].forEach((line) => {
         const li = document.createElement('li');
         li.textContent = line;
@@ -3666,6 +3845,7 @@
   scheduleTopOffsetRechecks();
   runMigrationIfNeeded().then(() => cleanupLegacyStorage());
   checkCacheThreshold(); // in case the cache was already over threshold from a prior session
+  checkForUpdate(); // throttled internally to once/day, harmless to call every load
 
   if (!getOnboarded()) {
     // Small delay so the modal doesn't compete with the page's own
