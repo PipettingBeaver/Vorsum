@@ -42,7 +42,10 @@ https://raw.githubusercontent.com/PipettingBeaver/Vorsum/refs/heads/main/Vorsum_
 
 4. There is a quick onboarding for first-time initialization for getting set up, or you can follow the beginner setup guide included below.
 
-# Quick user setup guide
+# Quick user setup guide 
+First-time user onboarding is included in Vorsum when Youtube is visited.
+An additional guide is included below for (free-tier Gemini) API key access setup:
+
 a. Make sure you're logged in to your Google account and navigate to [https://aistudio.google.com/api-keys](https://aistudio.google.com/api-keys).
 
 b. Click "Create API Key" and copy the unique code generated. Navigate back to YouTube.
