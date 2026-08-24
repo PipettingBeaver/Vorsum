@@ -20,7 +20,7 @@ Here are examples showing the base YouTube layout on light mode alongside compat
   </tr>
 </table>
 
-# Installation as Userscript
+# Installation as Userscript (Takes less than 2 minutes)
 All you need is ViolentMonkey or an equivalent Userscript Manager, paste in the URL for this open-source userscript, and you're good to go.
 1. Depending on what browser you prefer to use, ViolentMonkey can be found below:
    
