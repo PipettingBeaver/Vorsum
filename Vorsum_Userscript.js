@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Vorsum YouTube Summarizer
-// @namespace    //https://github.com/PipettingBeaver/Vorsum
-// @version      1.0.1
-// @description  Adds a click-to-summarize button to YouTube grid cards. It can work via caption-transcript or direct-URL (Gemini) modes. Beginner-friendly with tutorial for setup.
+// @name         Vorsum - Youtube Summary Button
+// @namespace    https://github.com/PipettingBeaver/Vorsum
+// @version      1.0.2
+// @description  Adds a click-to-summarize button to YouTube grid cards. Two modes: caption-transcript or direct-URL (Gemini watches the video itself). Beginner friendly and includes a tutorial.
 // @match        https://www.youtube.com/*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_setValue
@@ -29,7 +29,7 @@
   const MODEL = 'gemini-3.5-flash-lite'; // free-tier lightweight model on the Interactions API
   const SUMMARY_PROMPT =
     'Summarize this video in 3-4 sentences for someone deciding whether to watch it, and give in Standard Technical English. ' +
-    'Focus on the concrete points/conclusions, not vague teasers. Remove an agreement or "Here is a summary" from the start, only reply with summary itself.';
+    'Focus on the concrete points/conclusions, not vague teasers. Remove any preamble, only reply with summary itself. If caption returns repetitive or nonsensical content, suggest that video may be a music or art video.';
 
   // ---- LLM providers (Caption mode only - URL mode is Gemini-exclusive) ----
   // URL mode depends on Gemini's specific ability to ingest a YouTube URL
@@ -178,6 +178,13 @@
   }
   function setDownloadCaptionsEnabled(v) {
     GM_setValue('vorsum_download_captions', v);
+  }
+
+  function getTranscriptButtonEnabled() {
+    return GM_getValue('vorsum_transcript_button', false);
+  }
+  function setTranscriptButtonEnabled(v) {
+    GM_setValue('vorsum_transcript_button', v);
   }
 
   function sanitizeFilename(name) {
@@ -1735,6 +1742,48 @@
     });
   }
 
+  function showDeveloperContactModal() {
+    showSimpleModal('Developer Contact', (body) => {
+      addModalParagraph(
+        body,
+        'If you encounter a bug or have a feature request, here\'s what helps the developer diagnose and fix issues quickly:'
+      );
+
+      const infoList = document.createElement('div');
+      infoList.style.cssText = 'margin:0 0 12px;padding-left:18px';
+
+      const infoItems = [
+        'Browser and version (e.g., Chrome 126, Firefox 128)',
+        'Userscript manager and version (e.g., Tampermonkey 5.1.1)',
+        'Which mode you were using (URL or Caption)',
+        'The exact error message or behavior you saw',
+        'Steps to reproduce (what you clicked, what happened)',
+        'Check the Debug Log (Options → Troubleshooting) and include relevant errors'
+      ];
+
+      const ul = document.createElement('ul');
+      ul.style.cssText = 'margin:0;padding-left:20px';
+      infoItems.forEach(item => {
+        const li = document.createElement('li');
+        li.textContent = item;
+        li.style.cssText = 'margin-bottom:4px;font-size:12px';
+        ul.appendChild(li);
+      });
+      infoList.appendChild(ul);
+      body.appendChild(infoList);
+
+      addModalParagraph(
+        body,
+        'Email: [Your email here - update this before deploying]'
+      );
+
+      addModalParagraph(
+        body,
+        'GitHub: https://github.com/PipettingBeaver/Vorsum'
+      );
+    });
+  }
+
   // ---- Cache size threshold warning ----
   const CACHE_WARN_VIDEO_COUNT = 200;
   const CACHE_WARN_BYTES = 3 * 1024 * 1024; // ~3MB
@@ -2157,6 +2206,41 @@
     const optionsPanel = document.createElement('div');
     optionsPanel.style.cssText = 'display:none;flex-direction:column;gap:6px';
 
+    // Helper: Create collapsible section
+    function createCollapsibleSection(title, initiallyOpen = false) {
+      const section = document.createElement('div');
+      section.style.cssText = 'display:flex;flex-direction:column;gap:4px;margin-top:8px';
+
+      const header = document.createElement('button');
+      header.className = 'vorsum-ctrl-btn';
+      header.style.cssText = btnStyle + ';width:100%;text-align:left;display:flex;justify-content:space-between;align-items:center';
+
+      const headerText = document.createElement('span');
+      headerText.textContent = title;
+
+      const arrow = document.createElement('span');
+      arrow.textContent = initiallyOpen ? '▴' : '▾';
+      arrow.style.cssText = 'font-size:10px !important';
+
+      header.appendChild(headerText);
+      header.appendChild(arrow);
+
+      const body = document.createElement('div');
+      body.style.cssText = `display:${initiallyOpen ? 'flex' : 'none'};flex-direction:column;gap:4px;margin-top:4px;padding-left:8px`;
+
+      header.addEventListener('click', () => {
+        const isOpen = body.style.display !== 'none';
+        body.style.display = isOpen ? 'none' : 'flex';
+        arrow.textContent = isOpen ? '▾' : '▴';
+      });
+
+      section.appendChild(header);
+      section.appendChild(body);
+      registerThemedEl(header);
+
+      return { section, body };
+    }
+
     // -- API key (view/test/change) --
     const apiKeyLabel = document.createElement('div');
     apiKeyLabel.className = 'vorsum-label';
@@ -2223,12 +2307,18 @@
           } catch (e) {
             /* leave data null, handled below */
           }
-          if (data && !data.error) {
+          // Same check as the Options/Caption-mode LLM test and
+          // onboarding's own Test & Save - requires actual generated
+          // text, not just the absence of an .error field. A malformed
+          // key can come back as a 200 with no error object AND no real
+          // text, which read as "success" before this fix.
+          const result = data ? LLM_PROVIDERS.gemini.parseResponse(data) : { error: `HTTP ${res.status}, invalid JSON` };
+          if (result.text) {
             apiKeyTestBtn.textContent = '✓ Works';
             apiKeyTestBtn.title = '';
             log('API key test succeeded');
           } else {
-            const msg = data?.error?.message || `HTTP ${res.status}`;
+            const msg = result.error || `HTTP ${res.status}`;
             apiKeyTestBtn.textContent = '✗ Failed';
             apiKeyTestBtn.title = msg;
             log(`API key test failed: ${msg}`, 'warn');
@@ -2489,6 +2579,23 @@
     downloadCaptionsRow.appendChild(downloadCaptionsCheckbox);
     downloadCaptionsRow.appendChild(downloadCaptionsText);
 
+    // -- Show transcript download button --
+    const transcriptButtonRow = document.createElement('label');
+    transcriptButtonRow.style.cssText = 'display:flex;align-items:center;gap:6px;margin-top:6px;font-size:11px;cursor:pointer';
+    const transcriptButtonCheckbox = document.createElement('input');
+    transcriptButtonCheckbox.type = 'checkbox';
+    transcriptButtonCheckbox.checked = getTranscriptButtonEnabled();
+    transcriptButtonCheckbox.addEventListener('change', () => {
+      setTranscriptButtonEnabled(transcriptButtonCheckbox.checked);
+      log(`Show transcript download button: ${transcriptButtonCheckbox.checked}`);
+      // Trigger a rescan to add/remove transcript buttons from all cards
+      scanForCards();
+    });
+    const transcriptButtonText = document.createElement('span');
+    transcriptButtonText.textContent = 'Show transcript download button (T) next to summarize button';
+    transcriptButtonRow.appendChild(transcriptButtonCheckbox);
+    transcriptButtonRow.appendChild(transcriptButtonText);
+
     // -- Hover-reveal (DeArrow-style) --
     const hoverOnlyRow = document.createElement('label');
     hoverOnlyRow.style.cssText = 'display:flex;align-items:center;gap:6px;margin-top:6px;font-size:11px;cursor:pointer';
@@ -2595,24 +2702,7 @@
     promptButtonsRow.appendChild(savePromptBtn);
     promptButtonsRow.appendChild(resetPromptBtn);
 
-    optionsPanel.appendChild(apiKeyLabel);
-    optionsPanel.appendChild(apiKeyRow);
-    optionsPanel.appendChild(llmLabel);
-    optionsPanel.appendChild(llmDisclaimer);
-    optionsPanel.appendChild(llmProviderSelect);
-    optionsPanel.appendChild(llmFieldsWrap);
-    optionsPanel.appendChild(llmTestRow);
-    optionsPanel.appendChild(langLabel);
-    optionsPanel.appendChild(langInput);
-    optionsPanel.appendChild(downloadCaptionsRow);
-    optionsPanel.appendChild(hoverOnlyRow);
-    optionsPanel.appendChild(fontLabel);
-    optionsPanel.appendChild(fontRow);
-    optionsPanel.appendChild(promptLabel);
-    optionsPanel.appendChild(promptTextarea);
-    optionsPanel.appendChild(promptButtonsRow);
-
-    // -- data & privacy / cache size --
+    // -- data & privacy / cache size (created before Options panel reorganization) --
     const dataRow = document.createElement('div');
     dataRow.style.cssText = 'display:flex;align-items:center;gap:4px;margin-top:8px';
 
@@ -2638,19 +2728,73 @@
 
     dataRow.appendChild(cacheSizeLine);
     dataRow.appendChild(dataDesignBtn);
-    optionsPanel.appendChild(dataRow);
 
-    // Debugging lives here rather than at the top level of the widget -
-    // troubleshooting shouldn't be part of the everyday view.
+    // Debugging label (for collapsible section later)
     const debugLabel = document.createElement('div');
     debugLabel.className = 'vorsum-label';
-    debugLabel.style.cssText = 'font-size:10px !important;margin-top:8px';
-    debugLabel.textContent = 'Debugging';
+    debugLabel.style.cssText = 'font-size:10px !important;margin-bottom:4px';
+    debugLabel.textContent = 'Debug log';
 
-    optionsPanel.appendChild(debugLabel);
-    optionsPanel.appendChild(debugBtn);
-    optionsPanel.appendChild(logPanel);
-    optionsPanel.appendChild(logButtonsRow);
+    // ---- REORGANIZED OPTIONS PANEL ----
+    // Easy access items at the top
+    optionsPanel.appendChild(fontLabel);
+    optionsPanel.appendChild(fontRow);
+    optionsPanel.appendChild(downloadCaptionsRow);
+    optionsPanel.appendChild(transcriptButtonRow);
+    optionsPanel.appendChild(hoverOnlyRow);
+
+    // FAQ/Help button (links to onboarding)
+    const faqBtn = document.createElement('button');
+    faqBtn.className = 'vorsum-ctrl-btn';
+    faqBtn.textContent = '❓ FAQ / Show intro again';
+    faqBtn.style.cssText = btnStyle + ';width:100%;text-align:center;margin-top:6px';
+    faqBtn.addEventListener('click', () => showOnboarding());
+    optionsPanel.appendChild(faqBtn);
+    registerThemedEl(faqBtn);
+
+    // Data & Privacy at top
+    optionsPanel.appendChild(dataRow);
+
+    // ---- COLLAPSIBLE SECTIONS ----
+
+    // 1. API Configuration
+    const apiSection = createCollapsibleSection('API Configuration', false);
+    apiSection.body.appendChild(apiKeyLabel);
+    apiSection.body.appendChild(apiKeyRow);
+    apiSection.body.appendChild(llmLabel);
+    apiSection.body.appendChild(llmDisclaimer);
+    apiSection.body.appendChild(llmProviderSelect);
+    apiSection.body.appendChild(llmFieldsWrap);
+    apiSection.body.appendChild(llmTestRow);
+    optionsPanel.appendChild(apiSection.section);
+
+    // 2. Prompt Configuration
+    const promptSection = createCollapsibleSection('Prompt Configuration', false);
+    promptSection.body.appendChild(langLabel);
+    promptSection.body.appendChild(langInput);
+    promptSection.body.appendChild(promptLabel);
+    promptSection.body.appendChild(promptTextarea);
+    promptSection.body.appendChild(promptButtonsRow);
+    optionsPanel.appendChild(promptSection.section);
+
+    // 3. Troubleshooting
+    const troubleshootSection = createCollapsibleSection('Troubleshooting', false);
+
+    // Developer Contact button
+    const devContactBtn = document.createElement('button');
+    devContactBtn.className = 'vorsum-ctrl-btn';
+    devContactBtn.textContent = '📧 Developer Contact';
+    devContactBtn.style.cssText = btnStyle + ';width:100%;text-align:center;margin-bottom:6px';
+    devContactBtn.addEventListener('click', showDeveloperContactModal);
+    troubleshootSection.body.appendChild(devContactBtn);
+    registerThemedEl(devContactBtn);
+
+    troubleshootSection.body.appendChild(debugLabel);
+    troubleshootSection.body.appendChild(debugBtn);
+    troubleshootSection.body.appendChild(logPanel);
+    troubleshootSection.body.appendChild(logButtonsRow);
+    optionsPanel.appendChild(troubleshootSection.section);
+
 
     function renderModeBtn() {
       const mode = getMode();
@@ -2977,19 +3121,27 @@
 
     function close() {
       if (countdownTimer) clearInterval(countdownTimer);
+      // Reaching screen 3 requires a saved key (gated on screen 2's "\u2192
+      // How to use vorsum" button), so exiting from screen 3 - by any
+      // means - is the actual finish condition, not just opening the modal
+      // or saving a key on screen 2.
+      if (screen === 3) setOnboarded(true);
       backdrop.remove();
       onboardingModalOpen = false;
       document.removeEventListener('keydown', onKeydown);
     }
     function onKeydown(e) {
-      if (e.key === 'Escape') close();
+      // Only allow Escape to close on screen 3, matching the click-outside behavior
+      if (e.key === 'Escape' && screen === 3) close();
     }
+    // Click-outside-to-close is intentionally absent on screens 1-2 (see
+    // the comment above), but re-enabled specifically for screen 3, since
+    // "clicking off" the final screen is the described way to finish -
+    // and at that point there's nothing left to accidentally lose.
+    backdrop.addEventListener('click', (e) => {
+      if (e.target === backdrop && screen === 3) close();
+    });
     document.addEventListener('keydown', onKeydown);
-    // Deliberately NO click-outside-to-close here: a new user with no key
-    // configured yet who accidentally clicks off the modal shouldn't get
-    // silently dropped with no idea how they got stuck or how to get back -
-    // Escape still works (a deliberate keypress), and "Skip for now" below
-    // is the explicit, intentional way out.
 
     // ---- small DOM builder helpers (no innerHTML anywhere - YouTube's
     // Trusted Types CSP has been seen blocking that sink outright, and
@@ -3026,6 +3178,7 @@
       try {
         if (screen === 1) renderScreen1();
         else if (screen === 2) renderScreen2();
+        else if (screen === 3) renderScreen3();
       } catch (e) {
         // A blank modal is the worst possible first impression for someone
         // who doesn't have an API key yet - if anything unexpected throws
@@ -3127,6 +3280,20 @@
 
     // ---- Screen 2: instant setup ----
     function renderScreen2() {
+      // Declare references for elements we need to update dynamically
+      let nextToScreen3, hint;
+
+      function updateNextButtonState() {
+        const hasKey = hasAnyApiKeyConfigured();
+        if (nextToScreen3) {
+          nextToScreen3.disabled = !hasKey;
+          nextToScreen3.style.opacity = hasKey ? '1' : '0.5';
+        }
+        if (hint) {
+          hint.style.display = hasKey ? 'none' : 'block';
+        }
+      }
+
       body.appendChild(heading('Instant setup'));
       body.appendChild(heading('Get fast summaries with a free Gemini key', 'sub'));
 
@@ -3179,7 +3346,6 @@
           return;
         }
         GM_setValue('gemini_api_key', val);
-        setOnboarded(true); // populated - stop nagging on future loads
         renderNoKeyNotice();
         saveBtn.textContent = 'Testing\u2026';
         saveBtn.disabled = true;
@@ -3198,9 +3364,14 @@
             } catch (e) {
               /* handled below */
             }
-            const ok = data && !data.error;
-            keyStatus.textContent = ok ? '\u2713 Saved and working.' : `Saved, but the test call failed: ${data?.error?.message || `HTTP ${res.status}`}`;
+            // Same fix as the Options Gemini key test - requires real
+            // generated text, not just an absent .error field.
+            const result = data ? LLM_PROVIDERS.gemini.parseResponse(data) : { error: `HTTP ${res.status}, invalid JSON` };
+            const ok = !!result.text;
+            keyStatus.textContent = ok ? '\u2713 Saved and working.' : `Saved, but the test call failed: ${result.error || `HTTP ${res.status}`}`;
             log(ok ? 'Onboarding: Gemini key saved and verified' : 'Onboarding: Gemini key saved, test call failed', ok ? 'info' : 'warn');
+            // Update the "\u2192 How to use Vorsum" button state after key validation
+            updateNextButtonState();
           },
           ontimeout: () => {
             saveBtn.disabled = false;
@@ -3288,7 +3459,9 @@
       body.appendChild(techBtn);
 
       const backRow = document.createElement('div');
-      backRow.style.cssText = 'display:flex;justify-content:space-between;margin-top:14px';
+      backRow.style.cssText = 'display:flex;flex-direction:column;gap:4px;margin-top:14px';
+      const backAndNextRow = document.createElement('div');
+      backAndNextRow.style.cssText = 'display:flex;justify-content:space-between;align-items:center';
       const backToIntro = document.createElement('button');
       backToIntro.className = 'vorsum-ctrl-btn';
       backToIntro.textContent = '\u2190 Back';
@@ -3297,11 +3470,97 @@
         screen = 1;
         render();
       });
-      const doneBtn = btn("Got it, let's go");
-      doneBtn.addEventListener('click', close);
-      backRow.appendChild(backToIntro);
-      backRow.appendChild(doneBtn);
+      // Reaching screen 3 requires a real key - that's what makes it the
+      // actual finish condition (see close()) instead of this screen.
+      nextToScreen3 = btn('\u2192 How to use Vorsum');
+      nextToScreen3.addEventListener('click', () => {
+        if (!hasAnyApiKeyConfigured()) return;
+        screen = 3;
+        render();
+      });
+      backAndNextRow.appendChild(backToIntro);
+      backAndNextRow.appendChild(nextToScreen3);
+      backRow.appendChild(backAndNextRow);
+
+      // Always create hint element, control visibility via updateNextButtonState()
+      hint = document.createElement('div');
+      hint.className = 'vorsum-label';
+      hint.style.cssText = 'font-size:10px !important;text-align:right';
+      hint.textContent = 'Save a key above first (Gemini, or Advanced \u2192 Test & Save)';
+      backRow.appendChild(hint);
+
       body.appendChild(backRow);
+
+      // Initialize button state based on current key availability
+      updateNextButtonState();
+    }
+
+    // ---- Screen 3: how to use vorsum ----
+    function renderScreen3() {
+      body.appendChild(heading('How to use vorsum'));
+
+      const demoWrap = document.createElement('div');
+      demoWrap.style.cssText = 'display:flex;align-items:center;gap:10px;margin-bottom:6px';
+      const demoBtn = document.createElement('div'); // illustrative only, not a real button
+      demoBtn.className = 'vorsum-btn';
+      demoBtn.textContent = '\u2211';
+      demoBtn.setAttribute('aria-hidden', 'true');
+      demoBtn.style.cssText =
+        'display:inline-flex;align-items:center;justify-content:center;width:28px;height:24px;border-width:1px;border-style:solid;border-radius:3px;font-size:14px !important;flex-shrink:0';
+      const demoText = document.createElement('div');
+      demoText.style.cssText = 'font-size:12px';
+      demoText.textContent = 'This appears when you hover near a video card or its title. Click it to get a summary.';
+      demoWrap.appendChild(demoBtn);
+      demoWrap.appendChild(demoText);
+      body.appendChild(demoWrap);
+      registerThemedEl(demoBtn); // themed like a real button, even though it's just a mockup here
+
+      body.appendChild(para('\u2211 can work one of two ways:'));
+
+      const modesBox = document.createElement('div');
+      modesBox.className = 'vorsum-history-row'; // reuse for a subtle bordered box, already themed
+      modesBox.style.cssText = 'border-width:1px;border-style:solid;border-radius:4px;padding:8px;margin-bottom:12px;font-size:11px;line-height:1.5';
+      const urlLine = document.createElement('div');
+      urlLine.textContent = 'URL \u2014 slower, but works for every video';
+      urlLine.style.cssText = 'margin-bottom:4px';
+      const capLine = document.createElement('div');
+      capLine.textContent = "Caption \u2014 faster, but doesn't work for music or when captions are disabled";
+      modesBox.appendChild(urlLine);
+      modesBox.appendChild(capLine);
+      body.appendChild(modesBox);
+
+      const optionsPara = document.createElement('p');
+      optionsPara.style.cssText = 'margin:0 0 12px';
+      optionsPara.appendChild(document.createTextNode('In Options: switch light/dark theme ('));
+      optionsPara.appendChild(document.createTextNode('\u2600/\u263e'));
+      optionsPara.appendChild(document.createTextNode(' at the top), replay this intro any time ('));
+      const qMark = document.createElement('span');
+      qMark.textContent = '?';
+      optionsPara.appendChild(qMark);
+      optionsPara.appendChild(
+        document.createTextNode(
+          '), resize summary text, or set \u2211 to skip the LLM entirely and just download the transcript.'
+        )
+      );
+      body.appendChild(optionsPara);
+
+      body.appendChild(para('Have fun!'));
+
+      const finishRow = document.createElement('div');
+      finishRow.style.cssText = 'display:flex;justify-content:space-between;margin-top:4px';
+      const backToTwo = document.createElement('button');
+      backToTwo.className = 'vorsum-ctrl-btn';
+      backToTwo.textContent = '\u2190 Back';
+      backToTwo.style.cssText = 'padding:6px 14px;border-width:1px;border-style:solid;border-radius:4px;cursor:pointer;font-size:12px !important';
+      backToTwo.addEventListener('click', () => {
+        screen = 2;
+        render();
+      });
+      const finishBtn = btn("Done, let's go!");
+      finishBtn.addEventListener('click', close); // close() marks onboarded when screen === 3, see below
+      finishRow.appendChild(backToTwo);
+      finishRow.appendChild(finishBtn);
+      body.appendChild(finishRow);
     }
 
     // ---- Screen 3: technical details (nested popup, stacked above) ----
@@ -3398,13 +3657,17 @@
 
     const contentArea = getContentArea(card);
 
+    // Container for both buttons (side-by-side)
+    const btnContainer = document.createElement('div');
+    btnContainer.style.cssText = 'display:flex;gap:4px;margin-top:4px';
+
+    // Summarize button (\u03a3)
     const btn = document.createElement('button');
     btn.className = 'vorsum-btn';
     btn.dataset.vorsumVideoId = videoId;
     btn.textContent = '\u2211';
     btn.setAttribute('aria-label', 'Summarize');
     btn.style.cssText = [
-      'margin-top:4px',
       'padding:2px 8px',
       'font-size:11px !important',
       'border-width:1px',
@@ -3419,9 +3682,57 @@
       handleClick(videoId, card, btn);
     });
 
-    contentArea.appendChild(btn);
+    btnContainer.appendChild(btn);
     registerThemedEl(btn);
-    refreshButtonCachedVisual(btn, videoId); // colors it in immediately if a summary is already cached
+    refreshButtonCachedVisual(btn, videoId);
+
+    // Transcript download button (T) - only if enabled
+    if (getTranscriptButtonEnabled()) {
+      const transcriptBtn = document.createElement('button');
+      transcriptBtn.className = 'vorsum-btn vorsum-transcript-btn';
+      transcriptBtn.dataset.vorsumVideoId = videoId;
+      transcriptBtn.textContent = 'T';
+      transcriptBtn.setAttribute('aria-label', 'Download transcript');
+      transcriptBtn.style.cssText = [
+        'padding:2px 8px',
+        'font-size:11px !important',
+        'border-width:1px',
+        'border-style:solid',
+        'border-radius:3px',
+        'cursor:pointer'
+      ].join(';');
+
+      transcriptBtn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        handleTranscriptDownload(videoId, card, transcriptBtn);
+      });
+
+      btnContainer.appendChild(transcriptBtn);
+      registerThemedEl(transcriptBtn);
+
+      // Share hover state with the transcript button
+      transcriptBtn.dataset.vorsumHovered = 'false';
+      card.addEventListener('mouseenter', () => {
+        transcriptBtn.dataset.vorsumHovered = 'true';
+        applyBtnHoverVisibility(transcriptBtn);
+      });
+      card.addEventListener('mouseleave', () => {
+        transcriptBtn.dataset.vorsumHovered = 'false';
+        applyBtnHoverVisibility(transcriptBtn);
+      });
+      transcriptBtn.addEventListener('focus', () => {
+        transcriptBtn.dataset.vorsumHovered = 'true';
+        applyBtnHoverVisibility(transcriptBtn);
+      });
+      transcriptBtn.addEventListener('blur', () => {
+        transcriptBtn.dataset.vorsumHovered = 'false';
+        applyBtnHoverVisibility(transcriptBtn);
+      });
+      applyBtnHoverVisibility(transcriptBtn);
+    }
+
+    contentArea.appendChild(btnContainer);
 
     // Hover-reveal listens on the CARD (not just the button, which is
     // invisible when hidden and hard to "discover" by hovering it
@@ -3580,8 +3891,12 @@
   // regardless of what's visually shown, since the glyph alone reads as
   // nothing meaningful to a screen reader.
   function setButtonState(btn, label, disabled) {
-    const isIdle = label === 'Summarize';
-    btn.textContent = isIdle ? '\u2211' : `\u2211 - ${label}`;
+    const isTranscriptBtn = btn.classList.contains('vorsum-transcript-btn');
+    const idleLabel = isTranscriptBtn ? 'T' : 'Summarize';
+    const idleGlyph = isTranscriptBtn ? 'T' : '\u2211';
+
+    const isIdle = label === idleLabel;
+    btn.textContent = isIdle ? idleGlyph : `${idleGlyph} - ${label}`;
     btn.setAttribute('aria-label', label);
     btn.disabled = !!disabled;
     btn.dataset.vorsumActive = isIdle ? 'false' : 'true';
@@ -3589,6 +3904,44 @@
   }
 
   // ---- Core logic ----
+  async function handleTranscriptDownload(videoId, card, btn) {
+    const cardTitle = extractVideoTitle(card);
+
+    log(`Transcript download: video=${videoId}`);
+
+    // Check if we have a cached transcript first
+    let transcript = getCachedTranscript(videoId);
+
+    if (!transcript) {
+      setButtonState(btn, 'Fetching...', true);
+      try {
+        transcript = await getTranscript(videoId);
+      } catch (e) {
+        log(`Transcript fetch threw: ${e.message}`, 'error');
+        setButtonState(btn, 'No captions', false);
+        setTimeout(() => setButtonState(btn, 'T', false), 2000);
+        return;
+      }
+
+      if (!transcript) {
+        log('Transcript: none available for this video', 'warn');
+        setButtonState(btn, 'No captions', false);
+        setTimeout(() => setButtonState(btn, 'T', false), 2000);
+        return;
+      }
+
+      setCachedTranscript(videoId, transcript);
+    } else {
+      log('Transcript: using cached transcript');
+    }
+
+    // Download the transcript
+    downloadFile(`${sanitizeFilename(cardTitle || videoId)}_transcript.txt`, transcript, 'text/plain');
+    log('Transcript: downloaded locally');
+    setButtonState(btn, 'Downloaded ✓', false);
+    setTimeout(() => setButtonState(btn, 'T', false), 2000);
+  }
+
   async function handleClick(videoId, card, btn, attempt = 1) {
     const mode = getMode();
     const cached = getCachedSummary(videoId, mode);

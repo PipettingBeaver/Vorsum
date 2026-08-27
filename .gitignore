@@ -1,0 +1,51 @@
+# ---- OS cruft ----
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+# Linux
+*~
+.directory
+.Trash-*
+
+# ---- Editors / IDEs ----
+.vscode/
+.idea/
+*.swp
+*.swo
+*.sublime-workspace
+*.sublime-project
+*.code-workspace
+
+# ---- Backups / temp / logs ----
+*.bak
+*.tmp
+*.orig
+*.log
+
+# ---- Local-only docs ----
+CLAUDE.md
+
+# ---- Secrets ----
+# API keys live in the userscript manager's storage, never in the repo.
+# Guard against ever committing one by accident.
+.env
+.env.*
+*.key
+secrets.*
+
+# ---- Tooling (only if a build/lint setup is ever added) ----
+node_modules/
+npm-debug.log*
+yarn-error.log*
+.cache/
+dist/
