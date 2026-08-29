@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Vorsum - Youtube Summary Button
 // @namespace    https://github.com/PipettingBeaver/Vorsum
-// @version      1.0.2
+// @version      1.0.6
 // @description  Adds a click-to-summarize button to YouTube grid cards. Two modes: caption-transcript or direct-URL (Gemini watches the video itself). Beginner friendly and includes a tutorial.
 // @match        https://www.youtube.com/*
 // @grant        GM_xmlhttpRequest
@@ -1473,6 +1473,11 @@
       card.querySelector('.ytLockupMetadataViewModelHeadingReset') || // vanilla YouTube -
         // the h3's own title/aria-label is the clean title text; the <a>
         // itself carries a duration-suffixed aria-label instead
+      card.querySelector('h1.ytd-watch-metadata yt-formatted-string') || // modern watch-page title
+        // (the <h1> holds a yt-formatted-string child whose textContent is
+        // the real title)
+      card.querySelector('a.yt-uix-sessionlink.spf-link[title]') || // Vorapis watch-page title
+        // (the title link carries the clean title in its title attr)
       card.querySelector('a[href*="watch?v="]');
     const text = (el?.getAttribute('aria-label') || el?.getAttribute('title') || el?.textContent || '').trim();
     return text || null;
@@ -1486,6 +1491,8 @@
       card.querySelector('#channel-name') ||
       card.querySelector('a.yt-user-name') || // homepage featured shelf
       card.querySelector('.stat.attribution b') || // watch-page sidebar - plain text, no link
+      card.querySelector('yt-formatted-string.ytd-channel-name a') || // modern watch-page
+      card.querySelector('a.yt-uix-sessionlink.yt-user-name') || // Vorapis watch-page
       card.querySelector('a[href*="/@"]') ||
       card.querySelector('a[href*="/channel/"]');
     const name = (el?.textContent || '').trim() || null;
@@ -2245,7 +2252,7 @@
     const apiKeyLabel = document.createElement('div');
     apiKeyLabel.className = 'vorsum-label';
     apiKeyLabel.style.cssText = 'font-size:10px !important';
-    apiKeyLabel.textContent = 'Gemini API key (URL mode, and Caption mode if Gemini is selected below)';
+    apiKeyLabel.textContent = "API provider selected here. Google's Gemini has free API access, and is the only provider that works with URL mode.";
 
     const apiKeyRow = document.createElement('div');
     apiKeyRow.style.cssText = 'display:flex;align-items:center;gap:4px;margin-bottom:8px';
@@ -3759,6 +3766,138 @@
     applyBtnHoverVisibility(btn);
   }
 
+  // ---- Watch-page toolbar injection ----
+  // Unlike the grid-card path (injectButton), the watch page has no "card"
+  // to discover - the video IS the page. Instead, the \u2211 button is
+  // inserted directly into the watch page's own action toolbar, immediately
+  // to the left of an existing button group on that page:
+  //   - Modern YouTube: ytd-menu-renderer inside ytd-watch-metadata
+  //   - Vorapis / classic UI: .yt-uix-button-group
+  // Both use the same button factory and wire up to the same handleClick the
+  // grid-card buttons do, just with the current page's videoId/URL (there's
+  // no link to extract it from on the watch page) and a host element taken
+  // from the watch page itself for title/channel extraction. The button is
+  // not hover-revealed here - it lives in a persistent toolbar, so it stays
+  // visible the same way YouTube's own Like/Share buttons do.
+  //
+  // Returns the button element when it inserted (or already had one) so the
+  // caller can refresh its cached-state visual after a mode switch.
+  function injectWatchPageButton(anchor) {
+    const host = anchor.parentElement;
+    if (!host) return null;
+
+    const urlObj = parseWatchUrl();
+    if (!urlObj) return null;
+    const videoId = urlObj.searchParams.get('v');
+    if (!videoId) return null;
+
+    // Reuse an existing button under this anchor when present (SPA navigation
+    // can re-run this before the old toolbar is torn down), BUT rebind it to
+    // the current page's video: YouTube reuses the ytd-watch-metadata /
+    // button-group container across navigations, so a button injected for
+    // video A would otherwise still carry A's id after the user navigates to
+    // B - clicking it would summarize the wrong video, and the "Saved" tint
+    // would reflect A's cache state instead of B's. The click handler below
+    // reads the id from the dataset at click time (not from a closure), so
+    // just updating the dataset here is enough to retarget it.
+    let btn = host.querySelector(':scope > .vorsum-btn');
+    if (btn) {
+      if (btn.dataset.vorsumVideoId === videoId) return btn; // already bound to this video
+      btn.dataset.vorsumVideoId = videoId;
+      // Close any overlay the stale button had open - it was anchored to the
+      // old video's summary and would now be pointing at the wrong one.
+      if (btn.__vorsumOverlay) closeSummaryOverlay(btn.__vorsumOverlay);
+      setButtonState(btn, 'Summarize', false);
+      refreshButtonCachedVisual(btn, videoId);
+      return btn;
+    }
+
+    // document as the "card" context: handleClick's extractVideoTitle /
+    // extractChannelInfo now have watch-page selectors, and a watch-page
+    // button has no card to pass otherwise. Equivalent to what grid cards
+    // provide - a scope to find the title/channel within.
+    const pageContext = document;
+
+    btn = document.createElement('button');
+    btn.className = 'vorsum-btn vorsum-watch-btn';
+    btn.dataset.vorsumVideoId = videoId;
+    btn.textContent = '\u2211';
+    btn.setAttribute('aria-label', 'Summarize');
+    // Inline toolbar styling: sits in a real action bar, so it takes the
+    // bar's height/flow like YouTube's own buttons rather than the small
+    // feed-card styling the grid buttons use.
+    btn.style.cssText = [
+      'display:inline-flex',
+      'align-items:center',
+      'justify-content:center',
+      'padding:0 10px',
+      'height:36px',
+      'margin-right:8px',
+      'font-size:14px !important',
+      'font-weight:bold',
+      'border-width:1px',
+      'border-style:solid',
+      'border-radius:18px',
+      'cursor:pointer',
+      'flex-shrink:0'
+    ].join(';');
+
+    btn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      // Read the id from the dataset at click time rather than from the
+      // closure: the same button element is retargeted across SPA
+      // navigations (see the reuse branch above), so the closure-captured
+      // videoId would be stale. The dataset is the source of truth.
+      handleClick(btn.dataset.vorsumVideoId, pageContext, btn);
+    });
+
+    anchor.parentElement.insertBefore(btn, anchor);
+    registerThemedEl(btn);
+    // Persistently visible (no hover-reveal) in a real toolbar, same as the
+    // grid buttons when hover-only is off. Set before refreshButtonCachedVisual
+    // so its internal applyBtnHoverVisibility call already sees the visible state.
+    btn.dataset.vorsumActive = 'false';
+    btn.dataset.vorsumHovered = 'true';
+    refreshButtonCachedVisual(btn, videoId);
+    return btn;
+  }
+
+  // Parse the current watch URL into a URL object, or null when not on a
+  // watch page. Kept here rather than reaching into handleClick's own
+  // watchUrl construction because the watch-page toolbar path is the one
+  // place the video identity comes from the page itself instead of a card
+  // link - and YouTube's watch URLs vary (/?v=, /watch?v=, embed, shorts),
+  // so centralizing it keeps injectWatchPageButton and any future caller
+  // from each re-deriving the same logic.
+  function parseWatchUrl() {
+    let path = location.pathname;
+    let search = location.search;
+    // /embed/ID and /shorts/ID put the id in the path, not a ?v= param -
+    // normalize to a /watch?v=ID URL object so the existing searchParams
+    // read below works uniformly. URL mode still sends the real original
+    // href to Gemini (via handleClick's watchUrl), so the provider sees the
+    // actual video, not the normalized form.
+    const shortsMatch = path.match(/^\/shorts\/([\w-]{6,})/);
+    if (shortsMatch) {
+      path = '/watch';
+      search = `?v=${shortsMatch[1]}`;
+    } else if (path.startsWith('/embed/')) {
+      const id = path.slice('/embed/'.length).split('/')[0];
+      if (id) {
+        path = '/watch';
+        search = `?v=${id}`;
+      }
+    } else if (path !== '/watch') {
+      return null;
+    }
+    try {
+      return new URL(`${location.origin}${path}${search}`);
+    } catch (e) {
+      return null;
+    }
+  }
+
   // Overlay instead of inline insertion: appending a summary directly
   // under a grid card breaks the grid's own vertical flow (pushes only
   // the card below it, distorts the row, leaves orphaned whitespace once
@@ -4170,6 +4309,14 @@
   // ---- Watch for grid cards being added ----
   function scanForCards() {
     document.querySelectorAll(CARD_SELECTOR).forEach(injectButton);
+    // Watch-page action toolbar (the \u2211 button that summarizes the page's
+    // own video, as opposed to grid-card buttons). Both selectors are tried
+    // each scan - they're mutually exclusive across the two UI variants
+    // (modern YouTube vs. Vorapis / classic), and on a non-watch page
+    // neither matches, so this is a cheap no-op everywhere else.
+    document
+      .querySelectorAll('ytd-menu-renderer.style-scope.ytd-watch-metadata #top-level-buttons-computed, #watch7-secondary-actions .yt-uix-button-group')
+      .forEach((anchor) => injectWatchPageButton(anchor));
     ensureWidget();
   }
 
