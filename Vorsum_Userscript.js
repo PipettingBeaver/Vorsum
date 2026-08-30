@@ -2038,6 +2038,8 @@
       'font-family:sans-serif',
       'line-height:1.2',
       'border-radius:6px',
+      'border-width:1px',
+      'border-style:solid',
       'cursor:pointer'
     ].join(';');
 
