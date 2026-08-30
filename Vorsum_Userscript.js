@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Vorsum - Youtube Summary Button
 // @namespace    https://github.com/PipettingBeaver/Vorsum
-// @version      1.0.7
+// @version      1.0.9
 // @description  Adds a click-to-summarize button to YouTube grid cards. Two modes: caption-transcript or direct-URL (Gemini watches the video itself). Beginner friendly and includes a tutorial.
 // @match        https://www.youtube.com/*
 // @grant        GM_xmlhttpRequest
@@ -45,7 +45,7 @@
   // nearly everyone in that space exposes.
   const LLM_PROVIDERS = {
     gemini: {
-      label: 'Gemini',
+      label: 'Gemini (Google)',
       needsBaseUrl: false,
       needsModel: false, // uses the fixed MODEL constant above, same as URL mode
       buildRequest({ apiKey, model, promptText, videoUri }) {
@@ -217,6 +217,12 @@
   // nothing on the page can out-rank that, and it doesn't depend on a
   // CSS selector correctly winning a specificity fight we can't see.
   function applyBtnHoverVisibility(btn) {
+    // Transcript button respects its own enabled setting
+    if (btn.classList.contains('vorsum-transcript-btn') && !getTranscriptButtonEnabled()) {
+      btn.style.setProperty('opacity', '0', 'important');
+      btn.style.setProperty('pointer-events', 'none', 'important');
+      return;
+    }
     if (!getHoverOnlyEnabled()) {
       btn.style.setProperty('opacity', '1', 'important');
       btn.style.setProperty('pointer-events', 'auto', 'important');
@@ -688,6 +694,11 @@
          whole panel, not just that one field. */
       .vorsum-widget-panel, .vorsum-widget-panel *, .vorsum-modal, .vorsum-modal * {
         box-sizing: border-box !important;
+      }
+      /* Keep the font-size slider row inside the panel so it never causes
+         a scrollbar regardless of screen resolution. */
+      .vorsum-widget-panel .vorsum-font-slider-wrap {
+        min-width: 0 !important;
       }
     `;
     document.head.appendChild(style);
@@ -1792,7 +1803,7 @@
   }
 
   // ---- Cache size threshold warning ----
-  const CACHE_WARN_VIDEO_COUNT = 200;
+  const CACHE_WARN_VIDEO_COUNT = 2000;
   const CACHE_WARN_BYTES = 3 * 1024 * 1024; // ~3MB
   let cacheWarningNoticeEl = null;
 
@@ -2246,125 +2257,12 @@
       return { section, body };
     }
 
-    // -- API key (view/test/change) --
-    const apiKeyLabel = document.createElement('div');
-    apiKeyLabel.className = 'vorsum-label';
-    apiKeyLabel.style.cssText = 'font-size:10px !important';
-    apiKeyLabel.textContent = "API provider selected here. Google's Gemini has free API access, and is the only provider that works with URL mode.";
-
-    const apiKeyRow = document.createElement('div');
-    apiKeyRow.style.cssText = 'display:flex;align-items:center;gap:4px;margin-bottom:8px';
-
-    const apiKeyValue = document.createElement('span');
-    apiKeyValue.style.cssText = 'flex:1;font-family:monospace;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
-
-    const apiKeyTestBtn = document.createElement('button');
-    apiKeyTestBtn.className = 'vorsum-ctrl-btn';
-    apiKeyTestBtn.textContent = 'Test';
-    apiKeyTestBtn.style.cssText = btnStyle + ';padding:2px 8px;text-align:center';
-
-    const apiKeyChangeBtn = document.createElement('button');
-    apiKeyChangeBtn.className = 'vorsum-ctrl-btn';
-    apiKeyChangeBtn.textContent = 'Change';
-    apiKeyChangeBtn.style.cssText = btnStyle + ';padding:2px 8px;text-align:center';
-
-    function maskApiKey(key) {
-      if (!key) return '(not set)';
-      if (key.length <= 8) return '•'.repeat(key.length);
-      return `${key.slice(0, 4)}${'•'.repeat(Math.max(4, key.length - 8))}${key.slice(-4)}`;
-    }
-    function renderApiKeyValue() {
-      apiKeyValue.textContent = maskApiKey(GM_getValue('gemini_api_key', ''));
-    }
-
-    apiKeyChangeBtn.addEventListener('click', () => {
-      const next = prompt('Enter your Gemini API key (from aistudio.google.com):', '') || '';
-      if (next) {
-        GM_setValue('gemini_api_key', next);
-        setOnboarded(true); // a real key now exists somewhere - stop nagging on every load
-        renderNoKeyNotice();
-        renderApiKeyValue();
-        log('API key updated');
-      }
-    });
-
-    apiKeyTestBtn.addEventListener('click', () => {
-      const key = GM_getValue('gemini_api_key', '');
-      if (!key) {
-        apiKeyTestBtn.textContent = 'No key set';
-        setTimeout(() => (apiKeyTestBtn.textContent = 'Test'), 2000);
-        return;
-      }
-      apiKeyTestBtn.textContent = 'Testing…';
-      apiKeyTestBtn.disabled = true;
-      log('Testing API key...');
-      GM_xmlhttpRequest({
-        method: 'POST',
-        url: `https://generativelanguage.googleapis.com/v1beta/interactions?key=${key}`,
-        headers: { 'Content-Type': 'application/json', 'Api-Revision': '2026-05-20' },
-        timeout: 15000,
-        data: JSON.stringify({ model: MODEL, input: [{ type: 'text', text: 'Reply with only the word: OK' }] }),
-        onload: (res) => {
-          apiKeyTestBtn.disabled = false;
-          let data = null;
-          try {
-            data = JSON.parse(res.responseText);
-          } catch (e) {
-            /* leave data null, handled below */
-          }
-          // Same check as the Options/Caption-mode LLM test and
-          // onboarding's own Test & Save - requires actual generated
-          // text, not just the absence of an .error field. A malformed
-          // key can come back as a 200 with no error object AND no real
-          // text, which read as "success" before this fix.
-          const result = data ? LLM_PROVIDERS.gemini.parseResponse(data) : { error: `HTTP ${res.status}, invalid JSON` };
-          if (result.text) {
-            apiKeyTestBtn.textContent = '✓ Works';
-            apiKeyTestBtn.title = '';
-            log('API key test succeeded');
-          } else {
-            const msg = result.error || `HTTP ${res.status}`;
-            apiKeyTestBtn.textContent = '✗ Failed';
-            apiKeyTestBtn.title = msg;
-            log(`API key test failed: ${msg}`, 'warn');
-          }
-          setTimeout(() => {
-            apiKeyTestBtn.textContent = 'Test';
-            apiKeyTestBtn.title = '';
-          }, 4000);
-        },
-        ontimeout: () => {
-          apiKeyTestBtn.disabled = false;
-          apiKeyTestBtn.textContent = '✗ Timeout';
-          log('API key test timed out', 'warn');
-          setTimeout(() => (apiKeyTestBtn.textContent = 'Test'), 4000);
-        },
-        onerror: () => {
-          apiKeyTestBtn.disabled = false;
-          apiKeyTestBtn.textContent = '✗ Error';
-          log('API key test: network error', 'warn');
-          setTimeout(() => (apiKeyTestBtn.textContent = 'Test'), 4000);
-        }
-      });
-    });
-
-    apiKeyRow.appendChild(apiKeyValue);
-    apiKeyRow.appendChild(apiKeyTestBtn);
-    apiKeyRow.appendChild(apiKeyChangeBtn);
-
-
-    // -- Caption mode LLM provider (URL mode stays Gemini-only, see the
+    // -- LLM provider (URL mode stays Gemini-only, see the
     // comment on LLM_PROVIDERS for why) --
     const llmLabel = document.createElement('div');
     llmLabel.className = 'vorsum-label';
-    llmLabel.style.cssText = 'font-size:10px !important;margin-top:8px';
-    llmLabel.textContent = 'Caption mode LLM provider';
-
-    const llmDisclaimer = document.createElement('div');
-    llmDisclaimer.className = 'vorsum-label';
-    llmDisclaimer.style.cssText = 'font-size:10px !important;line-height:1.3;margin-bottom:4px';
-    llmDisclaimer.textContent =
-      'Caption mode only ever sees the video\'s transcript text - no visuals, tone, on-screen text, or audio beyond speech. URL mode (Gemini only) watches the actual video and is more capable, at the cost of being slower.';
+    llmLabel.style.cssText = 'font-size:10px !important';
+    llmLabel.textContent = "API provider selected here. Google's Gemini is recommended for most users as it offers free API access, and is the only provider that works with URL mode.";
 
     const llmProviderSelect = document.createElement('select');
     llmProviderSelect.className = 'vorsum-select';
@@ -2378,6 +2276,12 @@
 
     const llmFieldsWrap = document.createElement('div');
     llmFieldsWrap.style.cssText = 'display:flex;flex-direction:column;gap:4px;margin-top:4px';
+
+    const geminiKeyInput = document.createElement('input');
+    geminiKeyInput.type = 'password';
+    geminiKeyInput.className = 'vorsum-search-input';
+    geminiKeyInput.placeholder = 'Gemini API key';
+    geminiKeyInput.style.cssText = 'font-size:11px !important;padding:3px 5px;border-width:1px;border-style:solid;border-radius:3px;width:100%';
 
     const anthKeyRow = document.createElement('div');
     anthKeyRow.style.cssText = 'display:flex;gap:4px';
@@ -2408,13 +2312,8 @@
     oaiModelInput.placeholder = LLM_PROVIDERS.openai_compatible.modelPlaceholder;
     oaiModelInput.style.cssText = 'font-size:11px !important;padding:3px 5px;border-width:1px;border-style:solid;border-radius:3px;margin-top:4px;width:100%';
 
-    const geminiNote = document.createElement('div');
-    geminiNote.className = 'vorsum-label';
-    geminiNote.style.cssText = 'font-size:10px !important';
-    geminiNote.textContent = 'Uses the Gemini API key above.';
-
     anthKeyRow.appendChild(anthKeyInput);
-    llmFieldsWrap.appendChild(geminiNote);
+    llmFieldsWrap.appendChild(geminiKeyInput);
     llmFieldsWrap.appendChild(anthKeyRow);
     llmFieldsWrap.appendChild(anthModelInput);
     llmFieldsWrap.appendChild(oaiKeyInput);
@@ -2439,7 +2338,7 @@
     function renderLlmFields() {
       const provider = getLlmProvider();
       llmProviderSelect.value = provider;
-      geminiNote.style.display = provider === 'gemini' ? 'block' : 'none';
+      geminiKeyInput.style.display = provider === 'gemini' ? 'block' : 'none';
       anthKeyRow.style.display = provider === 'anthropic' ? 'flex' : 'none';
       anthModelInput.style.display = provider === 'anthropic' ? 'block' : 'none';
       oaiKeyInput.style.display = provider === 'openai_compatible' ? 'block' : 'none';
@@ -2447,6 +2346,7 @@
       oaiModelInput.style.display = provider === 'openai_compatible' ? 'block' : 'none';
 
       const creds = getProviderCredentials(provider);
+      if (provider === 'gemini') geminiKeyInput.value = creds.apiKey;
       if (provider === 'anthropic') anthKeyInput.value = creds.apiKey;
       if (provider === 'openai_compatible') {
         oaiKeyInput.value = creds.apiKey;
@@ -2466,6 +2366,12 @@
       if (anthKeyInput.value) setOnboarded(true);
       renderNoKeyNotice();
       log('Anthropic API key updated');
+    });
+    geminiKeyInput.addEventListener('change', () => {
+      GM_setValue('gemini_api_key', geminiKeyInput.value);
+      if (geminiKeyInput.value) setOnboarded(true);
+      renderNoKeyNotice();
+      log('Gemini API key updated');
     });
     anthModelInput.addEventListener('change', () => {
       GM_setValue('vorsum_anthropic_model', anthModelInput.value.trim());
@@ -2569,21 +2475,6 @@
       log(`Summary language set to: ${langInput.value.trim() || '(model default)'}`);
     });
 
-    // -- Download captions instead of summarizing --
-    const downloadCaptionsRow = document.createElement('label');
-    downloadCaptionsRow.style.cssText = 'display:flex;align-items:center;gap:6px;margin-top:8px;font-size:11px;cursor:pointer';
-    const downloadCaptionsCheckbox = document.createElement('input');
-    downloadCaptionsCheckbox.type = 'checkbox';
-    downloadCaptionsCheckbox.checked = getDownloadCaptionsEnabled();
-    downloadCaptionsCheckbox.addEventListener('change', () => {
-      setDownloadCaptionsEnabled(downloadCaptionsCheckbox.checked);
-      log(`Download captions instead of summarizing: ${downloadCaptionsCheckbox.checked}`);
-    });
-    const downloadCaptionsText = document.createElement('span');
-    downloadCaptionsText.textContent = 'Download captions instead of summarizing (Caption mode; skips the LLM call entirely)';
-    downloadCaptionsRow.appendChild(downloadCaptionsCheckbox);
-    downloadCaptionsRow.appendChild(downloadCaptionsText);
-
     // -- Show transcript download button --
     const transcriptButtonRow = document.createElement('label');
     transcriptButtonRow.style.cssText = 'display:flex;align-items:center;gap:6px;margin-top:6px;font-size:11px;cursor:pointer';
@@ -2597,7 +2488,7 @@
       scanForCards();
     });
     const transcriptButtonText = document.createElement('span');
-    transcriptButtonText.textContent = 'Show transcript download button (T) next to summarize button';
+    transcriptButtonText.textContent = 'Enable transcript download button (T)';
     transcriptButtonRow.appendChild(transcriptButtonCheckbox);
     transcriptButtonRow.appendChild(transcriptButtonText);
 
@@ -2613,7 +2504,7 @@
       log(`Hover-reveal: ${hoverOnlyCheckbox.checked}`);
     });
     const hoverOnlyText = document.createElement('span');
-    hoverOnlyText.textContent = `Hide \u2211 until hovering the video (auto-detected: ${isMobileDevice() ? 'touch device, off by default' : 'has hover, on by default'})`;
+    hoverOnlyText.textContent = `Hide \u2211 and T buttons unless hovering.`;
     hoverOnlyRow.appendChild(hoverOnlyCheckbox);
     hoverOnlyRow.appendChild(hoverOnlyText);
 
@@ -2625,6 +2516,17 @@
     const fontRow = document.createElement('div');
     fontRow.style.cssText = 'display:flex;align-items:center;gap:4px';
 
+    // [-] and [+] buttons flanking the slider — the three share the
+    // width the slider previously occupied (flex:1 total, each gets 1/3).
+    const fontSliderWrap = document.createElement('div');
+    fontSliderWrap.style.cssText = 'display:flex;align-items:center;gap:0';
+    fontSliderWrap.className = 'vorsum-font-slider-wrap';
+
+    const fontMinusBtn = document.createElement('button');
+    fontMinusBtn.className = 'vorsum-ctrl-btn';
+    fontMinusBtn.textContent = '−'; // minus sign
+    fontMinusBtn.style.cssText = btnStyle + ';width:28px;text-align:center;padding-left:0;padding-right:0';
+
     // A 1px-granularity slider instead of 5 named steps - finer control,
     // and there's no real value in naming the sizes in between.
     const fontSlider = document.createElement('input');
@@ -2632,7 +2534,16 @@
     fontSlider.min = String(MIN_FONT_SIZE_PX);
     fontSlider.max = String(MAX_FONT_SIZE_PX);
     fontSlider.step = '1';
-    fontSlider.style.cssText = 'flex:1';
+    fontSlider.style.cssText = 'flex:1;min-width:0';
+
+    const fontPlusBtn = document.createElement('button');
+    fontPlusBtn.className = 'vorsum-ctrl-btn';
+    fontPlusBtn.textContent = '+';
+    fontPlusBtn.style.cssText = btnStyle + ';width:28px;text-align:center;padding-left:0;padding-right:0';
+
+    fontSliderWrap.appendChild(fontMinusBtn);
+    fontSliderWrap.appendChild(fontSlider);
+    fontSliderWrap.appendChild(fontPlusBtn);
 
     const fontCurrentLabel = document.createElement('span');
     fontCurrentLabel.style.cssText = 'width:36px;text-align:center;font-size:11px !important';
@@ -2642,7 +2553,7 @@
     fontResetBtn.textContent = 'Reset';
     fontResetBtn.style.cssText = btnStyle + ';text-align:center';
 
-    fontRow.appendChild(fontSlider);
+    fontRow.appendChild(fontSliderWrap);
     fontRow.appendChild(fontCurrentLabel);
     fontRow.appendChild(fontResetBtn);
 
@@ -2650,6 +2561,8 @@
       const px = getFontSizePx();
       fontSlider.value = String(px);
       fontCurrentLabel.textContent = `${px}px`;
+      fontMinusBtn.disabled = px <= MIN_FONT_SIZE_PX;
+      fontPlusBtn.disabled = px >= MAX_FONT_SIZE_PX;
     }
 
     fontSlider.addEventListener('input', () => {
@@ -2659,6 +2572,24 @@
     });
     fontSlider.addEventListener('change', () => {
       log(`Summary font size set to ${getFontSizePx()}px`);
+    });
+
+    fontMinusBtn.addEventListener('click', () => {
+      const px = getFontSizePx();
+      if (px > MIN_FONT_SIZE_PX) {
+        setFontSizePx(px - 1);
+        applyFontSize();
+        renderFontRow();
+      }
+    });
+
+    fontPlusBtn.addEventListener('click', () => {
+      const px = getFontSizePx();
+      if (px < MAX_FONT_SIZE_PX) {
+        setFontSizePx(px + 1);
+        applyFontSize();
+        renderFontRow();
+      }
     });
 
     fontResetBtn.addEventListener('click', () => {
@@ -2744,7 +2675,6 @@
     // Easy access items at the top
     optionsPanel.appendChild(fontLabel);
     optionsPanel.appendChild(fontRow);
-    optionsPanel.appendChild(downloadCaptionsRow);
     optionsPanel.appendChild(transcriptButtonRow);
     optionsPanel.appendChild(hoverOnlyRow);
 
@@ -2764,10 +2694,7 @@
 
     // 1. API Configuration
     const apiSection = createCollapsibleSection('API Configuration', false);
-    apiSection.body.appendChild(apiKeyLabel);
-    apiSection.body.appendChild(apiKeyRow);
     apiSection.body.appendChild(llmLabel);
-    apiSection.body.appendChild(llmDisclaimer);
     apiSection.body.appendChild(llmProviderSelect);
     apiSection.body.appendChild(llmFieldsWrap);
     apiSection.body.appendChild(llmTestRow);
@@ -3075,7 +3002,6 @@
     renderModeBtn();
     renderDebugBtn();
     renderFontRow();
-    renderApiKeyValue();
     renderLlmFields();
 
     document.documentElement.appendChild(panel);
@@ -3226,10 +3152,10 @@
 
       body.appendChild(
         para(
-          "vorsum drops a \u2211 button on videos you don't have time to watch right now. Hover a video, click \u2211, get a few sentences back - enough to decide whether it's worth coming back to, or enough on its own if it isn't."
+          "vorsum adds a \u2211 button for interesting videos you don't have time to watch right now. Hover a video, click \u2211, and get a few sentences back. Maybe it's enough to decide whether it's worth watching, or enough on its own if it was click-bait or you've got other plans."
         )
       );
-      body.appendChild(para('One thing before you start: summarizing needs an API key - a free one takes about a minute to set up on the next screen.'));
+      body.appendChild(para('One thing before you start: summarizing needs an API key: a free one takes about a minute to set up on the next screen.'));
 
       const nextRow = document.createElement('div');
       nextRow.style.cssText = 'display:flex;justify-content:space-between;align-items:center;margin-top:4px';
@@ -3299,7 +3225,7 @@
       }
 
       body.appendChild(heading('Instant setup'));
-      body.appendChild(heading('Get fast summaries with a free Gemini key', 'sub'));
+      body.appendChild(heading('Get fast summaries with a free Google Gemini key', 'sub'));
 
       const steps = document.createElement('ol');
       steps.style.cssText = 'margin:0 0 12px;padding-left:18px';
@@ -3316,7 +3242,7 @@
 
       const linkBtn = document.createElement('button');
       linkBtn.className = 'vorsum-ctrl-btn';
-      linkBtn.textContent = '\ud83d\udd11 Get free Gemini key';
+      linkBtn.textContent = '\ud83d\udd11 Get free Gemini key (Open Google API key page)';
       linkBtn.style.cssText =
         'padding:6px 10px;border-width:1px;border-style:solid;border-radius:4px;cursor:pointer;font-size:11px !important;width:100%;margin-bottom:6px';
       linkBtn.addEventListener('click', () => window.open('https://aistudio.google.com/app/apikey', '_blank'));
@@ -3513,7 +3439,7 @@
         'display:inline-flex;align-items:center;justify-content:center;width:28px;height:24px;border-width:1px;border-style:solid;border-radius:3px;font-size:14px !important;flex-shrink:0';
       const demoText = document.createElement('div');
       demoText.style.cssText = 'font-size:12px';
-      demoText.textContent = 'This appears when you hover near a video card or its title. Click it to get a summary.';
+      demoText.textContent = 'This appears when you hover near a video card or title. Click to get a summary.';
       demoWrap.appendChild(demoBtn);
       demoWrap.appendChild(demoText);
       body.appendChild(demoWrap);
@@ -3525,27 +3451,30 @@
       modesBox.className = 'vorsum-history-row'; // reuse for a subtle bordered box, already themed
       modesBox.style.cssText = 'border-width:1px;border-style:solid;border-radius:4px;padding:8px;margin-bottom:12px;font-size:11px;line-height:1.5';
       const urlLine = document.createElement('div');
-      urlLine.textContent = 'URL \u2014 slower, but works for every video';
+      urlLine.textContent = 'U: URL mode \u2014 slower, but works for every video (Only works with Gemini)';
       urlLine.style.cssText = 'margin-bottom:4px';
       const capLine = document.createElement('div');
-      capLine.textContent = "Caption \u2014 faster, but doesn't work for music or when captions are disabled";
+      capLine.textContent = "C: Caption mode \u2014 faster, but doesn't work for music or when captions are disabled";
       modesBox.appendChild(urlLine);
       modesBox.appendChild(capLine);
       body.appendChild(modesBox);
 
       const optionsPara = document.createElement('p');
       optionsPara.style.cssText = 'margin:0 0 12px';
-      optionsPara.appendChild(document.createTextNode('In Options: switch light/dark theme ('));
-      optionsPara.appendChild(document.createTextNode('\u2600/\u263e'));
-      optionsPara.appendChild(document.createTextNode(' at the top), replay this intro any time ('));
-      const qMark = document.createElement('span');
-      qMark.textContent = '?';
-      optionsPara.appendChild(qMark);
-      optionsPara.appendChild(
-        document.createTextNode(
-          '), resize summary text, or set \u2211 to skip the LLM entirely and just download the transcript.'
-        )
-      );
+      optionsPara.appendChild(document.createTextNode('In Options (top left):'));
+      optionsPara.appendChild(document.createElement('br'));
+      optionsPara.appendChild(document.createTextNode('\u25CF (\uD83D\uDCDC) View history'));
+      optionsPara.appendChild(document.createElement('br'));
+      optionsPara.appendChild(document.createTextNode('\u25CF (\u2600/\u263E) Switch light/dark theme'));
+      optionsPara.appendChild(document.createElement('br'));
+      optionsPara.appendChild(document.createTextNode('\u25CF (U/C) Switch between URL/Caption mode'));
+      optionsPara.appendChild(document.createElement('br'));
+      optionsPara.appendChild(document.createTextNode('\u25CF (?) Replay this intro any time'));
+      optionsPara.appendChild(document.createElement('br'));
+      optionsPara.appendChild(document.createTextNode('\u25CF (\u2699) Resize summary text and other changes'));
+      optionsPara.appendChild(document.createElement('br'));
+      optionsPara.appendChild(document.createTextNode('\u25CF [-] Minimize UI'));
+
       body.appendChild(optionsPara);
 
       body.appendChild(para('Have fun!'));
@@ -3690,51 +3619,49 @@
     registerThemedEl(btn);
     refreshButtonCachedVisual(btn, videoId);
 
-    // Transcript download button (T) - only if enabled
-    if (getTranscriptButtonEnabled()) {
-      const transcriptBtn = document.createElement('button');
-      transcriptBtn.className = 'vorsum-btn vorsum-transcript-btn';
-      transcriptBtn.dataset.vorsumVideoId = videoId;
-      transcriptBtn.textContent = 'T';
-      transcriptBtn.setAttribute('aria-label', 'Download transcript');
-      transcriptBtn.style.cssText = [
-        'padding:2px 8px',
-        'font-size:11px !important',
-        'border-width:1px',
-        'border-style:solid',
-        'border-radius:3px',
-        'cursor:pointer'
-      ].join(';');
+    // Transcript download button (T) - always created, visibility controlled by hover
+    const transcriptBtn = document.createElement('button');
+    transcriptBtn.className = 'vorsum-btn vorsum-transcript-btn';
+    transcriptBtn.dataset.vorsumVideoId = videoId;
+    transcriptBtn.textContent = 'T';
+    transcriptBtn.setAttribute('aria-label', 'Download transcript');
+    transcriptBtn.style.cssText = [
+      'padding:2px 8px',
+      'font-size:11px !important',
+      'border-width:1px',
+      'border-style:solid',
+      'border-radius:3px',
+      'cursor:pointer'
+    ].join(';');
 
-      transcriptBtn.addEventListener('click', (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        handleTranscriptDownload(videoId, card, transcriptBtn);
-      });
+    transcriptBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      handleTranscriptDownload(videoId, card, transcriptBtn);
+    });
 
-      btnContainer.appendChild(transcriptBtn);
-      registerThemedEl(transcriptBtn);
+    btnContainer.appendChild(transcriptBtn);
+    registerThemedEl(transcriptBtn);
 
-      // Share hover state with the transcript button
-      transcriptBtn.dataset.vorsumHovered = 'false';
-      card.addEventListener('mouseenter', () => {
-        transcriptBtn.dataset.vorsumHovered = 'true';
-        applyBtnHoverVisibility(transcriptBtn);
-      });
-      card.addEventListener('mouseleave', () => {
-        transcriptBtn.dataset.vorsumHovered = 'false';
-        applyBtnHoverVisibility(transcriptBtn);
-      });
-      transcriptBtn.addEventListener('focus', () => {
-        transcriptBtn.dataset.vorsumHovered = 'true';
-        applyBtnHoverVisibility(transcriptBtn);
-      });
-      transcriptBtn.addEventListener('blur', () => {
-        transcriptBtn.dataset.vorsumHovered = 'false';
-        applyBtnHoverVisibility(transcriptBtn);
-      });
+    // Share hover state with the transcript button
+    transcriptBtn.dataset.vorsumHovered = 'false';
+    card.addEventListener('mouseenter', () => {
+      transcriptBtn.dataset.vorsumHovered = 'true';
       applyBtnHoverVisibility(transcriptBtn);
-    }
+    });
+    card.addEventListener('mouseleave', () => {
+      transcriptBtn.dataset.vorsumHovered = 'false';
+      applyBtnHoverVisibility(transcriptBtn);
+    });
+    transcriptBtn.addEventListener('focus', () => {
+      transcriptBtn.dataset.vorsumHovered = 'true';
+      applyBtnHoverVisibility(transcriptBtn);
+    });
+    transcriptBtn.addEventListener('blur', () => {
+      transcriptBtn.dataset.vorsumHovered = 'false';
+      applyBtnHoverVisibility(transcriptBtn);
+    });
+    applyBtnHoverVisibility(transcriptBtn);
 
     contentArea.appendChild(btnContainer);
 
