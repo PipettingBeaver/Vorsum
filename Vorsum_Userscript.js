@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Vorsum - Youtube Summary Button
 // @namespace    https://github.com/PipettingBeaver/Vorsum
-// @version      1.0.6
+// @version      1.0.7
 // @description  Adds a click-to-summarize button to YouTube grid cards. Two modes: caption-transcript or direct-URL (Gemini watches the video itself). Beginner friendly and includes a tutorial.
 // @match        https://www.youtube.com/*
 // @grant        GM_xmlhttpRequest
@@ -2034,6 +2034,12 @@
     // in the title row itself, rather than a whole extra row each -
     // tooltips still carry the full description for anyone unsure what
     // the glyph means.
+    const historyBtn = document.createElement('button');
+    historyBtn.className = 'vorsum-ctrl-btn';
+    historyBtn.textContent = '📜';
+    historyBtn.title = 'History';
+    historyBtn.style.cssText = squareBtnStyle;
+
     const themeBtn = document.createElement('button');
     themeBtn.className = 'vorsum-ctrl-btn';
     themeBtn.style.cssText = squareBtnStyle;
@@ -2055,28 +2061,23 @@
     helpBtn.style.cssText = squareBtnStyle;
     helpBtn.addEventListener('click', () => showOnboarding());
 
+    const optionsBtn = document.createElement('button');
+    optionsBtn.className = 'vorsum-ctrl-btn';
+    optionsBtn.textContent = '⚙️';
+    optionsBtn.title = 'Options';
+    optionsBtn.style.cssText = squareBtnStyle;
+
     row1.appendChild(title);
+    row1.appendChild(historyBtn);
     row1.appendChild(themeBtn);
     row1.appendChild(modeBtn);
     row1.appendChild(helpBtn);
+    row1.appendChild(optionsBtn);
     row1.appendChild(minBtn);
 
     const debugBtn = document.createElement('button');
     debugBtn.className = 'vorsum-ctrl-btn';
     debugBtn.style.cssText = btnStyle;
-
-    const historyOptionsRow = document.createElement('div');
-    historyOptionsRow.style.cssText = 'display:flex;gap:4px';
-
-    const historyBtn = document.createElement('button');
-    historyBtn.className = 'vorsum-ctrl-btn';
-    historyBtn.style.cssText = btnStyle + ';flex:1';
-    historyBtn.textContent = 'History';
-
-    const optionsBtn = document.createElement('button');
-    optionsBtn.className = 'vorsum-ctrl-btn';
-    optionsBtn.style.cssText = btnStyle + ';flex:1';
-    optionsBtn.textContent = 'Options';
 
     const historyNotice = document.createElement('div');
     historyNotice.className = 'vorsum-banner';
@@ -2115,9 +2116,6 @@
       if (openCaptionProviderSettings) openCaptionProviderSettings();
     });
     noKeyNoticeEl = noKeyNotice;
-
-    historyOptionsRow.appendChild(historyBtn);
-    historyOptionsRow.appendChild(optionsBtn);
 
     // -- log panel --
     const logPanel = document.createElement('div');
@@ -3065,7 +3063,6 @@
     };
 
     panel.appendChild(row1);
-    panel.appendChild(historyOptionsRow);
     panel.appendChild(historyNotice);
     panel.appendChild(cacheWarningNotice);
     panel.appendChild(rateLimitNotice);
