@@ -481,8 +481,8 @@
       dark: { background: '#1e1e1e', color: '#f0f0f0', borderColor: '#444444', colorScheme: 'dark' }
     },
     'vorsum-dot': {
-      light: { background: '#888888' },
-      dark: { background: '#666666' }
+      light: { background: '#f5f5f5', color: '#000000', borderColor: '#000000' },
+      dark: { background: '#333333', color: '#f0f0f0', borderColor: '#000000' }
     },
     'vorsum-ctrl-btn': {
       light: { background: '#f0f0f0', color: '#000000', borderColor: '#999999' },
@@ -555,8 +555,8 @@
       dark: { background: '#1e1e1e', color: '#dddddd', borderColor: '#3a3a3a', colorScheme: 'dark' }
     },
     'vorsum-banner': {
-      light: { background: '#fff6d8', color: '#5c4600', borderColor: '#e0c460' },
-      dark: { background: '#3a3320', color: '#ffe38a', borderColor: '#8a742f' }
+      light: { background: 'rgb(255,246,216)', color: 'rgb(92,70,0)', borderColor: 'rgb(224,196,96)' },
+      dark: { background: 'rgb(58,51,32)', color: 'rgb(255,227,138)', borderColor: 'rgb(138,116,47)' }
     },
     'vorsum-modal-backdrop': {
       light: { background: 'rgba(0,0,0,0.55)' },
@@ -1588,6 +1588,7 @@
   function notifyNewHistoryEntry(fromRemote = false) {
     pendingNewHistoryCount++;
     renderHistoryNotice();
+    renderMiniNotice();
     if (!fromRemote && historyChannel) {
       try {
         historyChannel.postMessage({ type: 'new-entry' });
@@ -1608,6 +1609,17 @@
     const plural = pendingNewHistoryCount === 1 ? '' : 's';
     historyNoticeEl.textContent = `${pendingNewHistoryCount} new summar${plural === '' ? 'y' : 'ies'} - ${verb} to view`;
     historyNoticeEl.style.display = 'block';
+  }
+
+  let miniNoticeEl = null;
+  function renderMiniNotice() {
+    if (!miniNoticeEl) return;
+    if (pendingNewHistoryCount <= 0) {
+      miniNoticeEl.style.display = 'none';
+      return;
+    }
+    miniNoticeEl.textContent = `${pendingNewHistoryCount} new`;
+    miniNoticeEl.style.display = 'block';
   }
 
   // ---- Generic small modal (Data & Privacy, History Stats) ----
@@ -1978,26 +1990,59 @@
   window.addEventListener('resize', applyWidgetTopOffset);
 
   function buildWidget() {
+    // Wrapper to hold both the dot and mini notice, stacking them vertically
+    const dotWrapper = document.createElement('div');
+    dotWrapper.id = 'vorsum-widget-dot-wrapper';
+    dotWrapper.style.cssText = [
+      'position:fixed',
+      'top:12px',
+      'right:12px',
+      'z-index:2147483647',
+      'display:none',
+      'flex-direction:column',
+      'align-items:flex-start',
+      'gap:2px'
+    ].join(';');
+
     const dot = document.createElement('div');
     dot.id = 'vorsum-widget-dot';
     dot.className = 'vorsum-dot';
     dot.title = 'Show vorsum controls';
     dot.textContent = 'V\u2211';
     dot.style.cssText = [
-      'position:fixed',
-      'top:8px', // corrected to the real masthead offset below, once known
-      'right:8px',
-      'z-index:2147483647',
-      'padding:2px 6px',
-      'font-size:11px !important',
+      'width:32px',
+      'height:32px',
+      'display:inline-flex',
+      'align-items:center',
+      'justify-content:center',
+      'font-size:14px !important',
+      'font-weight:bold',
+      'font-family:Verdana,sans-serif',
+      'line-height:2',
+      'border-radius:40%',
+      'border-width:1px',
+      'border-style:solid',
+      'box-sizing:border-box',
+      'cursor:pointer',
+      'box-shadow:0 1px 3px rgba(0,0,0,0.4)'
+    ].join(';');
+
+    // Mini notification badge below the dot (only shown when panel is collapsed)
+    const miniNotice = document.createElement('div');
+    miniNotice.id = 'vorsum-mini-notice';
+    miniNotice.className = 'vorsum-banner';
+    miniNotice.style.cssText = [
+      'padding:1px 4px',
+      'font-size:9px !important',
       'font-weight:bold',
       'font-family:sans-serif',
       'line-height:1.2',
-      'border-radius:10px',
-      'cursor:pointer',
-      'box-shadow:0 1px 3px rgba(0,0,0,0.4)',
-      'display:none'
+      'border-radius:6px',
+      'cursor:pointer'
     ].join(';');
+
+    dotWrapper.appendChild(dot);
+    dotWrapper.appendChild(miniNotice);
 
     const panel = document.createElement('div');
     panel.id = 'vorsum-widget';
@@ -2017,7 +2062,7 @@
       'display:flex',
       'flex-direction:column',
       'gap:4px',
-      'width:260px',
+      'width:360px',
       'max-height:80vh',
       'overflow-y:auto'
     ].join(';');
@@ -2070,7 +2115,7 @@
     helpBtn.textContent = '?';
     helpBtn.title = 'About vorsum / replay the intro';
     helpBtn.style.cssText = squareBtnStyle;
-    helpBtn.addEventListener('click', () => showOnboarding());
+    helpBtn.addEventListener('click', () => showOnboarding(3));
 
     const optionsBtn = document.createElement('button');
     optionsBtn.className = 'vorsum-ctrl-btn';
@@ -2096,6 +2141,20 @@
       'display:none;padding:3px 6px;font-size:10px !important;border-width:1px;border-style:solid;border-radius:3px;cursor:pointer;text-align:center';
     historyNotice.title = 'Click to load the new entries';
     historyNoticeEl = historyNotice;
+
+    miniNoticeEl = miniNotice;
+    registerThemedEl(miniNotice);
+    registerThemedEl(dot);
+    miniNotice.addEventListener('click', () => {
+      expand();
+      // Open History tab when clicking the mini notice
+      historyPanel.style.display = 'flex';
+      historyPanelOpen = true;
+      loadHistory(true);
+      pendingNewHistoryCount = 0;
+      renderHistoryNotice();
+      renderMiniNotice();
+    });
 
     const cacheWarningNotice = document.createElement('div');
     cacheWarningNotice.className = 'vorsum-banner';
@@ -2926,25 +2985,36 @@
 
     historyBtn.addEventListener('click', () => {
       const showing = historyPanel.style.display !== 'none';
+      // Close Options if open (mutual exclusion)
+      if (!showing) optionsPanel.style.display = 'none';
       historyPanel.style.display = showing ? 'none' : 'flex';
       historyPanelOpen = !showing;
       if (!showing) {
         loadHistory(true);
         pendingNewHistoryCount = 0;
         renderHistoryNotice();
+        renderMiniNotice();
       }
     });
 
     historyNotice.addEventListener('click', () => {
+      // Close Options if open (mutual exclusion)
+      optionsPanel.style.display = 'none';
       historyPanel.style.display = 'flex';
       historyPanelOpen = true;
       loadHistory(true);
       pendingNewHistoryCount = 0;
       renderHistoryNotice();
+      renderMiniNotice();
     });
 
     optionsBtn.addEventListener('click', () => {
       const showing = optionsPanel.style.display !== 'none';
+      // Close History if open (mutual exclusion)
+      if (!showing) {
+        historyPanel.style.display = 'none';
+        historyPanelOpen = false;
+      }
       optionsPanel.style.display = showing ? 'none' : 'flex';
       if (!showing) refreshCacheSizeLine();
     });
@@ -2968,21 +3038,34 @@
     function collapse() {
       setWidgetCollapsed(true);
       panel.style.display = 'none';
-      dot.style.display = 'block';
+      dotWrapper.style.display = 'flex';
+      renderMiniNotice();
     }
     function expand() {
       setWidgetCollapsed(false);
       panel.style.display = 'flex';
-      dot.style.display = 'none';
+      dotWrapper.style.display = 'none';
     }
     minBtn.addEventListener('click', collapse);
-    dot.addEventListener('click', expand);
+    dot.addEventListener('click', () => {
+      expand();
+      // Open History tab when clicking the mini dot
+      historyPanel.style.display = 'flex';
+      historyPanelOpen = true;
+      loadHistory(true);
+      pendingNewHistoryCount = 0;
+      renderHistoryNotice();
+      renderMiniNotice();
+    });
 
     // Lets onboarding's "advanced/custom provider" path jump straight to
     // the real Options UI (dropdown + per-provider fields + Test button)
     // instead of duplicating that whole form inside the onboarding modal.
     openCaptionProviderSettings = () => {
       expand();
+      // Close History if open (mutual exclusion)
+      historyPanel.style.display = 'none';
+      historyPanelOpen = false;
       optionsPanel.style.display = 'flex';
       refreshCacheSizeLine();
       llmProviderSelect.scrollIntoView({ block: 'center' });
@@ -3005,18 +3088,19 @@
     renderLlmFields();
 
     document.documentElement.appendChild(panel);
-    document.documentElement.appendChild(dot);
+    document.documentElement.appendChild(dotWrapper);
 
     registerThemedSubtree(panel);
-    registerThemedEl(dot);
+    registerThemedEl(dotWrapper);
 
     widgetPanelEl = panel;
-    widgetDotEl = dot;
+    widgetDotEl = dotWrapper;
     applyWidgetTopOffset();
 
     if (getWidgetCollapsed()) collapse();
 
     renderHistoryNotice();
+    renderMiniNotice();
     renderRateLimitNotice();
     renderUpdateNotice();
     renderNoKeyNotice();
@@ -3026,11 +3110,11 @@
 
   let onboardingModalOpen = false;
 
-  function showOnboarding() {
+  function showOnboarding(startScreen) {
     if (onboardingModalOpen) return; // don't stack a second modal if already open
     onboardingModalOpen = true;
 
-    let screen = 1;
+    let screen = startScreen || 1;
     let advancedOpen = false;
     let countdownTimer = null;
 
@@ -3118,9 +3202,9 @@
         body.replaceChildren();
         body.appendChild(heading('Welcome to vorsum'));
         body.appendChild(
-          para('Something went wrong showing the full setup screen. To get started: get a free Gemini API key, then paste it into Options \u2192 API key.')
+          para('Something went wrong showing the full setup screen. To get started: get a free Gemini API key, then paste it into Options \u2192 API configuration.')
         );
-        const fallbackLinkBtn = btn('\ud83d\udd11 Get free Gemini key');
+        const fallbackLinkBtn = btn('\ud83d\udd11 Get free Gemini key (Open Google API key page)');
         fallbackLinkBtn.addEventListener('click', () => window.open('https://aistudio.google.com/app/apikey', '_blank'));
         body.appendChild(fallbackLinkBtn);
       }
