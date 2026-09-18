@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Vorsum - Youtube Summary Button
 // @namespace    https://github.com/PipettingBeaver/Vorsum
-// @version      1.0.7
+// @version      1.0.9
 // @description  Adds a click-to-summarize button to YouTube grid cards. Two modes: caption-transcript or direct-URL (Gemini watches the video itself). Beginner friendly and includes a tutorial.
 // @match        https://www.youtube.com/*
 // @grant        GM_xmlhttpRequest
@@ -15,18 +15,39 @@
 // @connect      www.youtube.com
 // @connect      api.anthropic.com
 // @connect      api.openai.com
+// @connect      api.web3forms.com
 // @connect      *
 // @connect      raw.githubusercontent.com
-// @updateURL   https://raw.githubusercontent.com/PipettingBeaver/Vorsum/refs/heads/main/Vorsum_Userscript.js
-// @downloadURL https://raw.githubusercontent.com/PipettingBeaver/Vorsum/refs/heads/main/Vorsum_Userscript.js
+// @updateURL   https://github.com/PipettingBeaver/Vorsum/raw/refs/heads/main/Vorsum.user.js
+// @downloadURL https://github.com/PipettingBeaver/Vorsum/raw/refs/heads/main/Vorsum.user.js
 // @run-at       document-idle
 // ==/UserScript==
+
+// ---- Cutting a release ----
+// The version number lives in EXACTLY ONE place: the `// @version` line
+// above (currently line 4). Bump only that line.
+//   - getVersion() reads it at runtime from GM_info.script.version, so no
+//     JS constant needs updating.
+//   - @updateURL / @downloadURL / REPO_RAW_URL / REPO_PAGE_URL are all
+//     version-free and do not change between releases.
+// Pushing this file to `main` with a higher @version is what makes
+// ViolentMonkey/Tampermonkey - and the in-panel update banner - notice it.
 
 (function () {
   'use strict';
 
   // ---- Config ----
   const MODEL = 'gemini-3.5-flash-lite'; // free-tier lightweight model on the Interactions API
+
+  // InnerTube client used only to obtain caption tracks WITHOUT a PoToken.
+  // The ANDROID player returns caption track URLs that don't carry the
+  // exp=xpe "proof-of-origin required" flag, whereas the WEB client's do.
+  // This is what lets Caption mode work on layouts (e.g. Project Vorapis)
+  // that replace YouTube's modern HTML5 player with an older fork and hence
+  // never initialize the in-page BotGuard WebPoClient. The key is Google's
+  // long-public Android client key (same one yt-dlp and friends use).
+  const ANDROID_API_KEY = 'AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w';
+  const ANDROID_CLIENT_VERSION = '20.10.38';
   const SUMMARY_PROMPT =
     'Summarize this video in 3-4 sentences for someone deciding whether to watch it, and give in Standard Technical English. ' +
     'Focus on the concrete points/conclusions, not vague teasers. Remove any preamble, only reply with summary itself. If caption returns repetitive or nonsensical content, suggest that video may be a music or art video.';
@@ -302,7 +323,10 @@
     GM_setValue('vorsum_debug', on);
   }
   function getWidgetCollapsed() {
-    return GM_getValue('vorsum_widget_collapsed', false);
+    // Default to minimized (the floating dot), so a first-run install doesn't
+    // drop a full panel onto the page. The onboarding "I know what I'm doing"
+    // path still expands it via openCaptionProviderSettings().
+    return GM_getValue('vorsum_widget_collapsed', true);
   }
   function setWidgetCollapsed(collapsed) {
     GM_setValue('vorsum_widget_collapsed', collapsed);
@@ -355,8 +379,12 @@
   // notice the little badge for it. This is the second half: vorsum checks
   // for itself, on its own throttled schedule, and says so somewhere the
   // person is actually looking - inside its own panel.
-  const REPO_RAW_URL = 'https://raw.githubusercontent.com/PipettingBeaver/Vorsum/refs/heads/main/Vorsum_Userscript.js';
-  const REPO_PAGE_URL = 'https://github.com/PipettingBeaver/Vorsum';
+  const REPO_RAW_URL = 'https://raw.githubusercontent.com/PipettingBeaver/Vorsum/refs/heads/main/Vorsum.user.js';
+  // Where the in-panel update banner sends people. Points at the raw
+  // userscript URL (not the repo page) because that's the URL a userscript
+  // manager intercepts to offer install/update - the repo page would just
+  // show source code with no install prompt.
+  const REPO_PAGE_URL = 'https://github.com/PipettingBeaver/Vorsum/raw/refs/heads/main/Vorsum.user.js';
   const UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000; // once/day - no need for more than that
   let updateNoticeEl = null;
   let latestKnownVersion = null;
@@ -395,7 +423,7 @@
       updateNoticeEl.style.display = 'none';
       return;
     }
-    updateNoticeEl.textContent = `v${latestKnownVersion} available (you're on v${getVersion()}) - click to open the repo`;
+    updateNoticeEl.textContent = `v${latestKnownVersion} available (you're on v${getVersion()}) - click to update`;
     updateNoticeEl.style.display = 'block';
   }
 
@@ -627,7 +655,7 @@
   // named sizes, and there's no real value in naming the in-between ones.
   const MIN_FONT_SIZE_PX = 9;
   const MAX_FONT_SIZE_PX = 24;
-  const DEFAULT_FONT_SIZE_PX = 13;
+  const DEFAULT_FONT_SIZE_PX = 14;
 
   function getFontSizePx() {
     const stored = Number(GM_getValue('vorsum_font_size_px', DEFAULT_FONT_SIZE_PX));
@@ -789,7 +817,7 @@
   // over the click-handling logic as 'url'/'transcript', and nested under
   // much longer property names in storage already), which aren't worth
   // renaming for a couple of bytes. codeToModeLabel also normalizes old
-  // full-word records written before this existed, so History Stats
+  // full-word records written before this existed, so Stats & Data
   // grouping and display don't split "url (12)" / "U (34)" into separate
   // buckets.
   const MODE_TO_CODE = { url: 'U', transcript: 'C' };
@@ -1352,6 +1380,63 @@
     });
   }
 
+  // Token-free caption source. The ANDROID client's player response carries
+  // caption tracks whose baseUrl has no exp=xpe, so the timedtext fetch needs
+  // no PoToken/BotGuard at all. Tried FIRST by getTranscript - it works on
+  // both vanilla YouTube and player-replacing skins like Vorapis, and it
+  // sidesteps the WebPoClient entirely when it succeeds.
+  async function getPlayerResponseViaAndroid(videoId) {
+    const payload = {
+      context: {
+        client: {
+          clientName: 'ANDROID',
+          clientVersion: ANDROID_CLIENT_VERSION,
+          androidSdkVersion: 30,
+          hl: 'en',
+          gl: 'US'
+        }
+      },
+      videoId,
+      contentCheckOk: true,
+      racyCheckOk: true
+    };
+    return new Promise((resolve) => {
+      GM_xmlhttpRequest({
+        method: 'POST',
+        url: `https://www.youtube.com/youtubei/v1/player?key=${ANDROID_API_KEY}`,
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Youtube-Client-Name': '3',
+          'X-Youtube-Client-Version': ANDROID_CLIENT_VERSION,
+          'X-Goog-Api-Key': ANDROID_API_KEY
+        },
+        timeout: 15000,
+        data: JSON.stringify(payload),
+        onload: (res) => {
+          if (res.status < 200 || res.status >= 300) {
+            log(`Transcript: ANDROID player request HTTP ${res.status}`, 'warn');
+            resolve(null);
+            return;
+          }
+          try {
+            resolve(JSON.parse(res.responseText));
+          } catch (e) {
+            log(`Transcript: ANDROID player response JSON parse failed: ${e.message}`, 'warn');
+            resolve(null);
+          }
+        },
+        onerror: () => {
+          log('Transcript: ANDROID player request network error', 'warn');
+          resolve(null);
+        },
+        ontimeout: () => {
+          log('Transcript: ANDROID player request timed out', 'warn');
+          resolve(null);
+        }
+      });
+    });
+  }
+
   // Fallback for when the InnerTube path returns no usable caption tracks.
   // Note: the watch page no longer embeds caption tracks for every video
   // (they're loaded lazily by the player), so this is best-effort - it helps
@@ -1390,74 +1475,130 @@
   // client. A userscript is already inside the page, so it can use that
   // client directly instead of re-implementing the attestation challenge.
   //
-  // The client lives at window.top[<name>].bevasrs.wpc(); <name> is
-  // "havuokmhhs-0" when the bg_st_hr experiment is on, otherwise
-  // "havuokmhhs-<timeOrigin>" - matching YouTube's own Dp() helper. Calling
-  // wpc() resolves to the client, and client.mws({c: videoId}) mints a
-  // content-bound token (captions bind to the video id).
-  // Locate the WebPoClient's wpc() function: prefer the known global name,
-  // but if YouTube renames it between releases, scan window.top for any
-  // object exposing a .bevasrs.wpc function.
-  function locateWpc(top, knownName) {
-    const viaName = top[knownName]?.bevasrs?.wpc;
-    if (typeof viaName === 'function') return viaName;
-    for (const key of Object.keys(top)) {
-      try {
-        const candidate = top[key]?.bevasrs?.wpc;
-        if (typeof candidate === 'function') return candidate;
-      } catch (e) {
-        /* accessor that throws - skip */
+  // The authoritative mapping (from the player's own base.js, fia()/Mm()):
+  //   window[<name>].bevasrs.wpc()   where <name> is "havuokmhhs-0" under the
+  //                                  bg_st_hr experiment, else
+  //                                  "havuokmhhs-<floor(timeOrigin)>"
+  // wpc() yields the raw client whose .mws({c: videoId, ...}) mints a
+  // content-bound token (captions bind to the video id). base.js places the
+  // holder on `window` when the frame is top, otherwise on `window.top` - so
+  // both are checked.
+  //
+  // Returns the object that OWNS the wpc() method (not the bare function) so
+  // the caller can invoke it as holder.wpc() with the correct `this` - it is
+  // a method on the BotGuard object, and calling it detached breaks that
+  // binding. Falls back to scanning every enumerable key, since YouTube
+  // renames this global between releases.
+  function locateWpcHolder(roots, knownNames) {
+    for (const root of roots) {
+      if (!root) continue;
+      const names = [...knownNames, ...safeKeys(root).filter((k) => k.startsWith('havuokmhhs-'))];
+      for (const name of names) {
+        try {
+          const holder = root[name]?.bevasrs;
+          if (holder && typeof holder.wpc === 'function') return holder;
+        } catch (e) {
+          /* accessor that throws - skip */
+        }
+      }
+    }
+    for (const root of roots) {
+      for (const key of safeKeys(root)) {
+        try {
+          const val = root[key];
+          if (!val || typeof val !== 'object') continue;
+          if (val.bevasrs && typeof val.bevasrs.wpc === 'function') return val.bevasrs;
+          if (typeof val.wpc === 'function') return val;
+        } catch (e) {
+          /* accessor that throws - skip */
+        }
       }
     }
     return null;
+  }
+
+  function safeKeys(obj) {
+    try {
+      return obj ? Object.keys(obj) : [];
+    } catch (e) {
+      return [];
+    }
   }
 
   async function mintPoToken(videoId) {
     const win = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
     const top = win.top || win;
-    const ytcfg = win.ytcfg;
-    const experiments = ytcfg?.get ? ytcfg.get('EXPERIMENT_FLAGS') : null;
-    const bgStHr = !!(experiments && experiments.bg_st_hr);
-    const knownName = bgStHr ? 'havuokmhhs-0' : `havuokmhhs-${Math.floor(win.performance?.timeOrigin || 0)}`;
+    const timeOrigin = Math.floor(win.performance?.timeOrigin || 0);
+    // Try BOTH names regardless of the experiment flag: the player reads
+    // bg_st_hr from its own config (base.js fia()), which isn't guaranteed to
+    // agree with ytcfg's copy - guessing wrong here is exactly what produces
+    // "WebPoClient not found" while the client actually exists under the
+    // other name.
+    const knownNames = ['havuokmhhs-0', `havuokmhhs-${timeOrigin}`];
+    const roots = win === top ? [win] : [win, top];
 
-    // BotGuard initializes lazily, so poll briefly for the client to appear.
-    let wpc = locateWpc(top, knownName);
-    for (let attempt = 0; attempt < 10 && typeof wpc !== 'function'; attempt++) {
+    // BotGuard is created lazily (the player sets up the container the first
+    // time it needs a token), and its VM can take several seconds to attach
+    // `.bevasrs`. Poll patiently before giving up.
+    let holder = locateWpcHolder(roots, knownNames);
+    for (let attempt = 0; attempt < 25 && !holder; attempt++) {
       await new Promise((r) => setTimeout(r, 400));
-      wpc = locateWpc(top, knownName);
+      holder = locateWpcHolder(roots, knownNames);
     }
-    if (typeof wpc !== 'function') {
-      log('PoToken: WebPoClient not found (checked known name and scanned window.top)', 'warn');
+    if (!holder) {
+      log('PoToken: WebPoClient not found (checked both known names and scanned window + window.top)', 'warn');
       return null;
     }
 
+    // The exact request shape the player itself uses (base.js gia()):
+    // {c: videoId, mc: true, me: true, co: {c: videoId, a: true, s: true}}.
+    // A couple of reduced shapes are retried too in case the client rejects
+    // the newer one.
+    const shapes = [
+      { c: videoId, mc: true, me: true, co: { c: videoId, a: true, s: true } },
+      { c: videoId, mc: true, me: true },
+      { c: videoId }
+    ];
     for (let attempt = 0; attempt < 10; attempt++) {
+      let client;
       try {
-        const client = await wpc();
-        const token = await client.mws({ c: videoId, mc: false, me: false });
-        if (token && typeof token === 'string' && token.length > 10) {
-          log(`PoToken: minted content token for ${videoId} (${token.length} chars)`);
-          return token;
-        }
-        return null;
+        client = await holder.wpc(); // method call: keeps the correct `this`
       } catch (e) {
         if (String(e).includes('SDF:notready')) {
           await new Promise((r) => setTimeout(r, 500));
           continue;
         }
-        log(`PoToken: mint failed: ${e && e.message ? e.message : e}`, 'warn');
+        log(`PoToken: client acquisition failed: ${e && e.message ? e.message : e}`, 'warn');
         return null;
       }
+      for (const args of shapes) {
+        try {
+          const token = await client.mws(args);
+          if (token && typeof token === 'string' && token.length > 10) {
+            log(`PoToken: minted content token for ${videoId} (${token.length} chars)`);
+            return token;
+          }
+        } catch (e) {
+          const msg = e && e.message ? e.message : String(e);
+          if (msg.includes('SDF:notready')) {
+            await new Promise((r) => setTimeout(r, 500));
+            break; // break to outer retry
+          }
+          // try the next shape
+        }
+      }
     }
-    log('PoToken: client never became ready', 'warn');
+    log('PoToken: mint failed for all request shapes', 'warn');
     return null;
   }
 
   // Extract the /get_transcript endpoint params from the watch page HTML.
   // These params are session-bound (they embed the video id + caption
-  // params) and are exactly what YouTube's own "Show transcript" panel uses
-  // - that panel does NOT require a PoToken, which is why this is the
-  // preferred path over the PoToken-gated timedtext endpoint.
+  // params) and are what YouTube's own "Show transcript" panel uses. As of
+  // ~2026-09 this endpoint has started returning HTTP 400 "Precondition
+  // check failed" for requests made outside the page's own attested player
+  // session, so it is now only a best-effort first try; the PoToken +
+  // timedtext path below is the reliable one.
   function extractGetTranscriptParams(html) {
     const m = html.match(/getTranscriptEndpoint":\{"params":"([^"]+)"/);
     if (!m) return null;
@@ -1545,8 +1686,8 @@
 
   async function getTranscript(videoId) {
     // Fetch the watch page HTML once - it supplies both the get_transcript
-    // endpoint params (primary path, no PoToken) and the caption track list
-    // (fallback). Reused below to avoid a second fetch.
+    // endpoint params (best-effort first try) and the caption track list
+    // (the PoToken path). Reused below to avoid a second fetch.
     let pageHtml = null;
     try {
       const res = await fetch(`https://www.youtube.com/watch?v=${videoId}`, { credentials: 'same-origin' });
@@ -1555,8 +1696,10 @@
       log(`Transcript: watch page fetch failed: ${e.message}`, 'warn');
     }
 
-    // 1. Primary: YouTube's own /get_transcript endpoint (the "Show
-    //    transcript" panel) - no PoToken required.
+    // 1. Best-effort: YouTube's own /get_transcript endpoint (the "Show
+    //    transcript" panel). Now frequently HTTP 400s outside the page's own
+    //    attested session (see extractGetTranscriptParams), so treat it as an
+    //    opportunistic fast path, not the dependable one.
     if (pageHtml) {
       const params = extractGetTranscriptParams(pageHtml);
       if (params) {
@@ -1575,13 +1718,26 @@
       }
     }
 
-    // 2. Fallback: PoToken + InnerTube player + timedtext.
-    const poToken = await mintPoToken(videoId);
-    let playerResponse = await getPlayerResponseViaInnerTube(videoId, poToken);
-    const innerTracks = playerResponse?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
-    if ((!playerResponse || !innerTracks || !innerTracks.length) && pageHtml) {
-      log('Transcript: InnerTube response had no caption tracks - using watch-page HTML', 'warn');
-      playerResponse = await getPlayerResponseViaWatchPage(videoId, pageHtml);
+    // 2. Token-free first: the ANDROID InnerTube client returns caption
+    //    tracks whose URLs do NOT carry exp=xpe, so no PoToken/BotGuard is
+    //    needed. Preferred because it works even where the modern player (and
+    //    its WebPoClient) is absent - e.g. on Vorapis, which swaps in an
+    //    older HTML5 player.
+    let poToken = null;
+    let playerResponse = await getPlayerResponseViaAndroid(videoId);
+    let tracks = playerResponse?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
+
+    if (!tracks || !tracks.length) {
+      // 3. WEB player + watch-page HTML, with a BotGuard-minted PoToken.
+      log('Transcript: ANDROID client had no caption tracks - trying WEB + PoToken', 'warn');
+      poToken = await mintPoToken(videoId);
+      playerResponse = await getPlayerResponseViaInnerTube(videoId, poToken);
+      const innerTracks = playerResponse?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
+      if ((!playerResponse || !innerTracks || !innerTracks.length) && pageHtml) {
+        log('Transcript: InnerTube response had no caption tracks - using watch-page HTML', 'warn');
+        playerResponse = await getPlayerResponseViaWatchPage(videoId, pageHtml);
+      }
+      tracks = playerResponse?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
     }
 
     if (!playerResponse) {
@@ -1589,7 +1745,6 @@
       return null;
     }
 
-    const tracks = playerResponse?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
     if (!tracks || !tracks.length) {
       log('Transcript: no captionTracks in player response (video may have no captions)', 'warn');
       return null;
@@ -1654,12 +1809,32 @@
         .trim();
       log(`Transcript: parsed json3 format, ${events.length} event(s)`);
     } catch (e) {
-      // Fall back to XML parsing in case fmt=json3 wasn't honored for this
-      // particular track - some auto-generated tracks have been seen
-      // ignoring the fmt param and returning XML regardless.
-      log(`Transcript: response wasn't valid JSON (${e.message}), trying XML fallback`, 'warn');
-      const lines = [...bodyText.matchAll(/<text[^>]*>([^<]*)<\/text>/g)].map((m) => decodeEntities(m[1]));
-      transcript = lines.join(' ').replace(/\s+/g, ' ').trim();
+      // Failed JSON.parse means the server ignored fmt=json3 and returned
+      // XML. Two XML shapes are possible:
+      //   - legacy timedtext:      <text ...>content</text>
+      //   - timedtext format 3:    <p ...><s ...>word</s>...</p>
+      // (format 3 is what the ANDROID client returns for auto-generated
+      // tracks, so this branch matters for the token-free path.)
+      if (/<p\b[^>]*>/.test(bodyText)) {
+        log(`Transcript: response wasn't valid JSON (${e.message}), parsing timedtext format 3 (<p>/<s>)`, 'warn');
+        const paragraphs = [...bodyText.matchAll(/<p\b[^>]*>([\s\S]*?)<\/p>/g)];
+        const parts = [];
+        for (const para of paragraphs) {
+          const words = [...para[1].matchAll(/<s\b[^>]*>([\s\S]*?)<\/s>/g)].map((m) => decodeEntities(m[1]));
+          if (words.length) {
+            parts.push(words.join(''));
+          } else {
+            // A few format-3 lines carry text directly in the <p> instead.
+            const plain = decodeEntities(para[1].replace(/<[^>]+>/g, '')).trim();
+            if (plain) parts.push(plain);
+          }
+        }
+        transcript = parts.join(' ').replace(/\s+/g, ' ').trim();
+      } else {
+        log(`Transcript: response wasn't valid JSON (${e.message}), trying legacy XML (<text>) fallback`, 'warn');
+        const lines = [...bodyText.matchAll(/<text[^>]*>([^<]*)<\/text>/g)].map((m) => decodeEntities(m[1]));
+        transcript = lines.join(' ').replace(/\s+/g, ' ').trim();
+      }
     }
 
     if (!transcript) {
@@ -1689,25 +1864,36 @@
   }
 
   function extractVideoTitle(card) {
+    // The watch-page path passes `document` as the card (the video IS the
+    // page). On that path #video-title / .yt-lockup-title* / .title[title]
+    // match sidebar "up next"/related videos, NOT the video being watched -
+    // so those are only consulted for real grid cards. Getting this wrong is
+    // what makes a History entry show a different video's title than the one
+    // actually summarized (visible when Caption mode falls back to URL on a
+    // watch page, and the recorded title belongs to a sidebar video).
+    const isWatchPage = card === document;
     const el =
-      card.querySelector('h1.ytd-watch-metadata yt-formatted-string') || // modern watch-page title
-        // (the <h1> holds a yt-formatted-string child whose textContent is
-        // the real title) - checked FIRST because the watch-page path passes
-        // `document` as the card, and #video-title (below) would otherwise
-        // match a sidebar/up-next related video's title instead of the
-        // video actually on the page.
-      card.querySelector('a.yt-uix-sessionlink.spf-link[title]') || // Vorapis watch-page title
-        // (the title link carries the clean title in its title attr)
-      card.querySelector('#video-title') ||
-      card.querySelector('.yt-lockup-title a') ||
-      card.querySelector('.yt-lockup-title') ||
-      card.querySelector('.lohp-video-link') || // homepage featured shelf
-      card.querySelector('.title[title]') || // watch-page sidebar (span, not the <a>)
-      card.querySelector('.ytLockupMetadataViewModelHeadingReset') || // vanilla YouTube -
-        // the h3's own title/aria-label is the clean title text; the <a>
-        // itself carries a duration-suffixed aria-label instead
-      card.querySelector('a[href*="watch?v="]');
-    const text = (el?.getAttribute('aria-label') || el?.getAttribute('title') || el?.textContent || '').trim();
+      card.querySelector('h1.ytd-watch-metadata yt-formatted-string') || // modern YouTube watch-page title
+      card.querySelector('#eow-title') || // classic / Vorapis watch-page title
+      card.querySelector('h1.watch-title') || // classic watch-page title
+      card.querySelector('.watch-title') || // classic watch-page title
+      card.querySelector('#watch-headline-title h1') || // classic watch-page title
+      card.querySelector('a.yt-uix-sessionlink.spf-link[title]') || // Vorapis watch-page title link
+      (!isWatchPage && card.querySelector('#video-title')) ||
+      (!isWatchPage && card.querySelector('.yt-lockup-title a')) ||
+      (!isWatchPage && card.querySelector('.yt-lockup-title')) ||
+      (!isWatchPage && card.querySelector('.lohp-video-link')) || // homepage featured shelf
+      (!isWatchPage && card.querySelector('.title[title]')) || // sidebar (grid) title span
+      (!isWatchPage && card.querySelector('.ytLockupMetadataViewModelHeadingReset')) || // vanilla lockup card
+      (!isWatchPage && card.querySelector('a[href*="watch?v="]'));
+    let text = (el?.getAttribute('aria-label') || el?.getAttribute('title') || el?.textContent || '').trim();
+    // On a watch page where none of the watch-title selectors matched (an
+    // unfamiliar skin/DOM), the browser tab title ("Video Title - YouTube")
+    // is still the current video - far better than silently saving a sidebar
+    // video's title.
+    if (!text && isWatchPage) {
+      text = document.title.replace(/\s*[-–—]\s*YouTube\s*$/i, '').trim();
+    }
     return text || null;
   }
 
@@ -1827,7 +2013,7 @@
     historyNoticeEl.style.display = 'block';
   }
 
-  // ---- Generic small modal (Data & Privacy, History Stats) ----
+  // ---- Generic small modal (Data & Privacy, Stats & Data) ----
   // Deliberately separate from showOnboarding()'s modal below: onboarding
   // has its own one-time/replay semantics and Vorapis-detection logic that
   // don't apply here, and reusing it as-is risked tangling the two. This
@@ -1902,10 +2088,24 @@
         body,
         "Most providers bill per request, but usage here is tiny (a few sentences of text in, a few sentences out) - nowhere near enough to run up a real bill for casual use. Some providers, including Google Gemini, offer a genuinely free tier with no card required, which comfortably covers exactly this kind of lightweight, occasional use."
       );
-      addModalParagraph(
-        body,
-        "If you've never done this before: Gemini is the easiest starting point. Go to aistudio.google.com, sign in with a Google account, click 'Get API key', copy the string it gives you, and paste it into vorsum's Gemini API key field above. That's the whole process - no payment details needed for the free tier."
+      // Built by hand (not addModalParagraph) because it embeds a real
+      // hyperlink - that helper sets textContent, which would flatten it.
+      const geminiSteps = document.createElement('p');
+      geminiSteps.style.cssText = 'margin:0 0 10px';
+      const aiStudioLink = document.createElement('a');
+      aiStudioLink.href = 'https://aistudio.google.com';
+      aiStudioLink.target = '_blank';
+      aiStudioLink.rel = 'noopener noreferrer';
+      aiStudioLink.textContent = 'aistudio.google.com';
+      aiStudioLink.className = 'vorsum-history-title'; // reuse the themed link color
+      aiStudioLink.style.cssText = 'text-decoration:underline';
+      registerThemedEl(aiStudioLink); // added after showSimpleModal's theme sweep
+      geminiSteps.append(
+        "If you've never done this before: Gemini is the easiest starting point. Go to ",
+        aiStudioLink,
+        ", sign in with a Google account, click 'Get API key' at top right, copy the string it gives you, and paste it into Vorsum's Gemini API key field in the Options menu. There are no payment details needed for the free tier!"
       );
+      body.appendChild(geminiSteps);
       addModalParagraph(
         body,
         "Claude and OpenAI-compatible providers work the same way in principle (make an account, generate a key, paste it in) but typically require billing to be set up first, even if actual usage stays cheap. A local server (Ollama, LM Studio) needs no key or account at all - everything runs on your own machine."
@@ -1950,7 +2150,7 @@
   }
 
   function showHistoryStatsModal() {
-    showSimpleModal('History Stats', async (body) => {
+    showSimpleModal('Stats & Data', async (body) => {
       const loading = addModalParagraph(body, 'Loading...');
       try {
         const info = await getCacheSizeInfo();
@@ -1964,7 +2164,7 @@
         loading.remove();
         addModalParagraph(body, `Total summaries: ${info.historyCount}`);
         addModalParagraph(body, `By mode: ${modeSummary || '—'}`);
-        addModalParagraph(body, `Total size: ${formatBytes(info.totalBytes)}`);
+        addModalParagraph(body, `Local cache size: ${formatBytes(info.totalBytes)}`);
         if (info.entries.length) {
           const oldest = Math.min(...info.entries.map((e) => e.createdAt));
           const newest = Math.max(...info.entries.map((e) => e.createdAt));
@@ -1974,48 +2174,426 @@
       } catch (e) {
         loading.textContent = 'Could not load stats - see Debugging log.';
       }
+
+      // Export / clear block, moved here from the History panel so the
+      // History list itself stays compact. These buttons are created AFTER
+      // the modal's own registerThemedSubtree sweep (showSimpleModal runs it
+      // before fillBody), so register this row explicitly - otherwise the
+      // themed colors never get stamped on and they'd render unstyled.
+      const exportHeader = document.createElement('div');
+      exportHeader.textContent = 'Export data:';
+      exportHeader.style.cssText = 'margin:14px 0 6px;font-weight:bold';
+
+      const exportBtnStyle =
+        'flex:1;padding:5px 8px;border-width:1px;border-style:solid;border-radius:4px;cursor:pointer;font-size:12px !important;text-align:center';
+
+      const exportRow = document.createElement('div');
+      exportRow.style.cssText = 'display:flex;gap:6px';
+
+      const exportJsonBtn = document.createElement('button');
+      exportJsonBtn.className = 'vorsum-ctrl-btn';
+      exportJsonBtn.textContent = 'Export JSON';
+      exportJsonBtn.style.cssText = exportBtnStyle;
+      exportJsonBtn.addEventListener('click', () => exportHistory('json'));
+
+      const exportCsvBtn = document.createElement('button');
+      exportCsvBtn.className = 'vorsum-ctrl-btn';
+      exportCsvBtn.textContent = 'Export CSV';
+      exportCsvBtn.style.cssText = exportBtnStyle;
+      exportCsvBtn.addEventListener('click', () => exportHistory('csv'));
+
+      const clearHistoryBtn = document.createElement('button');
+      clearHistoryBtn.className = 'vorsum-ctrl-btn vorsum-danger-btn';
+      clearHistoryBtn.textContent = 'Clear all history';
+      clearHistoryBtn.style.cssText = exportBtnStyle;
+      clearHistoryBtn.addEventListener('click', async () => {
+        if (!confirm('Delete all vorsum summary history? This cannot be undone.')) return;
+        await historyClearAll();
+        if (historyListEl) historyListEl.replaceChildren();
+        log('History: cleared all entries', 'warn');
+        loadHistoryRef?.(true); // refresh an open History list, if there is one
+      });
+
+      exportRow.appendChild(exportJsonBtn);
+      exportRow.appendChild(exportCsvBtn);
+      exportRow.appendChild(clearHistoryBtn);
+
+      body.appendChild(exportHeader);
+      body.appendChild(exportRow);
+      registerThemedSubtree(exportRow);
     });
   }
 
   function showDeveloperContactModal() {
     showSimpleModal('Developer Contact', (body) => {
+      addModalParagraph(body, 'Got questions, comments, feedback? Feel free to reach out to the developer.');
+
+      const linkStyle = 'text-decoration:underline';
+
+      const emailP = document.createElement('p');
+      emailP.style.cssText = 'margin:0 0 10px';
+      emailP.appendChild(document.createTextNode('Email: '));
+      const emailLink = document.createElement('a');
+      emailLink.href = 'mailto:oriyion@gmail.com';
+      emailLink.textContent = 'oriyion@gmail.com';
+      emailLink.className = 'vorsum-history-title'; // reuse the themed link color
+      emailLink.style.cssText = linkStyle;
+      registerThemedEl(emailLink);
+      emailP.appendChild(emailLink);
+      body.appendChild(emailP);
+
+      const ghP = document.createElement('p');
+      ghP.style.cssText = 'margin:0 0 10px';
+      ghP.appendChild(document.createTextNode('GitHub: '));
+      const ghLink = document.createElement('a');
+      ghLink.href = 'https://github.com/PipettingBeaver/Vorsum';
+      ghLink.target = '_blank';
+      ghLink.rel = 'noopener noreferrer';
+      ghLink.textContent = 'https://github.com/PipettingBeaver/Vorsum';
+      ghLink.className = 'vorsum-history-title';
+      ghLink.style.cssText = linkStyle;
+      registerThemedEl(ghLink);
+      ghP.appendChild(ghLink);
+      body.appendChild(ghP);
+    });
+  }
+
+  // ---- Bug report form ----
+  // Auto-fills the environment details a maintainer always ends up asking
+  // for (browser, manager, version, mode/provider, debug log), leaves the two
+  // "your words" fields free-form, then compiles everything into one
+  // copyable block for a GitHub issue.
+  function getBrowserInfoString() {
+    const ua = navigator.userAgent || '';
+    let friendly = 'Unknown browser';
+    let m;
+    if ((m = ua.match(/Firefox\/([\d.]+)/))) friendly = `Firefox ${m[1]}`;
+    else if ((m = ua.match(/Edg\/([\d.]+)/))) friendly = `Edge ${m[1]}`;
+    else if ((m = ua.match(/OPR\/([\d.]+)/))) friendly = `Opera ${m[1]}`;
+    else if ((m = ua.match(/Chrome\/([\d.]+)/))) friendly = `Chrome ${m[1]}`;
+    else if ((m = ua.match(/Version\/([\d.]+).*Safari/))) friendly = `Safari ${m[1]}`;
+    const platform = navigator.platform ? ` on ${navigator.platform}` : '';
+    return `${friendly}${platform} (UA: ${ua})`;
+  }
+
+  function getUserscriptManagerString() {
+    try {
+      if (typeof GM_info !== 'undefined' && GM_info) {
+        const handler = GM_info.scriptHandler || 'unknown manager';
+        const ver = GM_info.version || '?';
+        return `${handler} ${ver}`;
+      }
+    } catch (e) {
+      /* fall through */
+    }
+    return 'Unknown userscript manager (GM_info unavailable)';
+  }
+
+  function getModeProviderString() {
+    const mode = getMode() === 'url' ? 'URL (Gemini watches the video)' : 'Caption (transcript-based)';
+    const providerKey = getLlmProvider();
+    const providerLabel = LLM_PROVIDERS[providerKey]?.label || providerKey;
+    return `Mode: ${mode} | Caption-mode API provider: ${providerLabel}`;
+  }
+
+  function buildBugReportText(f, maxLen = Infinity) {
+    const val = (k) => (f[k] && f[k].value ? f[k].value.trim() : '');
+    let text = [
+      'Vorsum bug report',
+      '=================',
+      `Vorsum version: ${getVersion()}`,
+      `Browser: ${val('browser')}`,
+      `Userscript manager: ${val('manager')}`,
+      `Mode / API provider: ${val('mode')}`,
+      `Page URL: ${val('pageUrl') || location.href}`,
+      '',
+      'What happened:',
+      val('problem') || '(not provided)',
+      '',
+      'Steps to reproduce:',
+      val('steps') || '(not provided)',
+      '',
+      'Debug log:',
+      val('log') || '(debug log empty - turn on Debug: ON in Options → Troubleshooting)',
+      ''
+    ].join('\n');
+    if (text.length > maxLen) {
+      text = text.slice(0, maxLen) + '\n... [truncated - use "Copy to Clipboard" for the full log]';
+    }
+    return text;
+  }
+
+  // GitHub's new-issue page accepts title/body query params, so the issue can
+  // be opened pre-filled. Bodies can get long (the debug log especially), so
+  // the URL-embedded copy is capped - "Copy to Clipboard" always carries the
+  // full text for pasting in manually.
+  const BUG_REPORT_URL_MAX_CHARS = 5000;
+
+  function openBugReportIssue(f) {
+    const firstLine = (f.problem?.value || '').trim().split('\n')[0].slice(0, 80);
+    const title = firstLine ? `Bug: ${firstLine}` : 'Vorsum bug report';
+    const issueBody = buildBugReportText(f, BUG_REPORT_URL_MAX_CHARS);
+    const url =
+      'https://github.com/PipettingBeaver/Vorsum/issues/new' +
+      `?title=${encodeURIComponent(title)}&body=${encodeURIComponent(issueBody)}`;
+    window.open(url, '_blank');
+  }
+
+  // Anonymous submission via Web3Forms - a small form-to-email relay.
+  const WEB3FORMS_ACCESS_KEY = 'e5918087-2e4e-416b-bba2-c12f5475a606'; // Web3Forms form access key
+  const WEB3FORMS_ENDPOINT = 'https://api.web3forms.com/submit';
+
+  // Once a report has actually been sent anonymously, don't allow sending
+  // again until the page is reloaded - avoids accidental duplicate emails.
+  let bugReportSubmitted = false;
+
+  // Mirrors openBugReportIssue (same compiled report), but POSTs it straight
+  // to the developer's inbox instead of opening GitHub - for people without a
+  // GitHub account. Uses GM_xmlhttpRequest rather than fetch so the request
+  // isn't subject to YouTube's page CSP / CORS. onStatus(text, state) where
+  // state is 'sending' | 'success' | 'error'.
+  function submitBugReportAnonymously(f, onStatus) {
+    if (bugReportSubmitted) return;
+    if (!WEB3FORMS_ACCESS_KEY) {
+      onStatus('⚠ Anonymous submission is not configured yet (access key missing).', 'error');
+      return;
+    }
+    const report = buildBugReportText(f);
+    const firstLine = (f.problem?.value || '').trim().split('\n')[0].slice(0, 80);
+    const subject = firstLine ? `Vorsum bug report: ${firstLine}` : 'Vorsum bug report';
+
+    const form = new URLSearchParams();
+    form.set('access_key', WEB3FORMS_ACCESS_KEY);
+    form.set('subject', subject);
+    form.set('from_name', 'Vorsum bug report (anonymous)');
+    form.set('message', report);
+    form.set('botcheck', '');
+
+    onStatus('Sending…', 'sending');
+    GM_xmlhttpRequest({
+      method: 'POST',
+      url: WEB3FORMS_ENDPOINT,
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
+      timeout: 20000,
+      data: form.toString(),
+      onload: (res) => {
+        let ok = res.status >= 200 && res.status < 300;
+        let msg = '';
+        try {
+          const data = JSON.parse(res.responseText);
+          if (data && typeof data.success === 'boolean') ok = ok && data.success;
+          msg = (data && data.message) || '';
+        } catch (e) {
+          /* non-JSON response - rely on the HTTP status */
+        }
+        if (ok) {
+          bugReportSubmitted = true;
+          log('Bug report: anonymous submission sent via Web3Forms');
+          onStatus('✓ Sent. Thank you - the developer will see your report.', 'success');
+        } else {
+          log(`Bug report: anonymous submission failed (HTTP ${res.status}) ${msg}`, 'warn');
+          onStatus(`⚠ Send failed: ${msg || `HTTP ${res.status}`}`, 'error');
+        }
+      },
+      onerror: () => {
+        log('Bug report: anonymous submission network error', 'warn');
+        onStatus('⚠ Send failed: network error.', 'error');
+      },
+      ontimeout: () => {
+        log('Bug report: anonymous submission timed out', 'warn');
+        onStatus('⚠ Send failed: timed out.', 'error');
+      }
+    });
+  }
+
+  function showBugReportModal() {
+    showSimpleModal('Set up bug report', (body) => {
       addModalParagraph(
         body,
-        'If you encounter a bug or have a feature request, here\'s what helps the developer diagnose and fix issues quickly:'
+        'Found a bug? It happens. This page opens a formatted information ticket for the developer to use as reference. Please write a short description of the issue, steps to reproduce (if possible), and click "Submit Anonymously".'
       );
 
-      const infoList = document.createElement('div');
-      infoList.style.cssText = 'margin:0 0 12px;padding-left:18px';
+      const fieldEls = {};
 
-      const infoItems = [
-        'Browser and version (e.g., Chrome 126, Firefox 128)',
-        'Userscript manager and version (e.g., Tampermonkey 5.1.1)',
-        'Which mode you were using (URL or Caption)',
-        'The exact error message or behavior you saw',
-        'Steps to reproduce (what you clicked, what happened)',
-        'Check the Debug Log (Options → Troubleshooting) and include relevant errors'
-      ];
+      function field(parent, labelText, key, { value = '', placeholder = '', rows = 4, refresh = null, mono = false } = {}) {
+        const wrap = document.createElement('div');
+        wrap.style.cssText = 'margin-bottom:10px';
 
-      const ul = document.createElement('ul');
-      ul.style.cssText = 'margin:0;padding-left:20px';
-      infoItems.forEach(item => {
-        const li = document.createElement('li');
-        li.textContent = item;
-        li.style.cssText = 'margin-bottom:4px;font-size:12px';
-        ul.appendChild(li);
+        const header = document.createElement('div');
+        header.style.cssText = 'display:flex;align-items:center;gap:6px;margin-bottom:3px';
+        const label = document.createElement('label');
+        label.textContent = labelText;
+        label.style.cssText = 'flex:1;font-size:12px;font-weight:bold';
+        header.appendChild(label);
+
+        const input = document.createElement('textarea');
+        input.rows = rows;
+        input.className = 'vorsum-textarea';
+        input.style.cssText =
+          'width:100%;font-size:12px !important;padding:4px 5px;border-width:1px;border-style:solid;border-radius:3px;resize:vertical' +
+          (mono ? ';font-family:monospace' : '');
+        input.value = value;
+        if (placeholder) input.placeholder = placeholder;
+
+        if (refresh) {
+          const refreshBtn = document.createElement('button');
+          refreshBtn.className = 'vorsum-ctrl-btn';
+          refreshBtn.textContent = 'Refresh';
+          refreshBtn.style.cssText =
+            'padding:2px 8px;border-width:1px;border-style:solid;border-radius:3px;cursor:pointer;font-size:11px !important';
+          refreshBtn.addEventListener('click', () => {
+            input.value = refresh();
+          });
+          header.appendChild(refreshBtn);
+        }
+
+        wrap.appendChild(header);
+        wrap.appendChild(input);
+        parent.appendChild(wrap);
+        fieldEls[key] = input;
+        return input;
+      }
+
+      // -- Top: the report itself --
+      field(body, 'What happened?', 'problem', {
+        rows: 4,
+        placeholder: 'Describe the issue - e.g. "Clicking Summarize did nothing", plus any error text shown.'
       });
-      infoList.appendChild(ul);
-      body.appendChild(infoList);
+      field(body, 'Steps to reproduce', 'steps', {
+        rows: 4,
+        placeholder: 'e.g. 1) Opened a video 2) Clicked Σ 3) ...'
+      });
 
-      addModalParagraph(
-        body,
-        'Email: [Your email here - update this before deploying]'
-      );
+      // -- Action buttons --
+      const actionRow = document.createElement('div');
+      actionRow.style.cssText = 'display:flex;gap:6px;margin:2px 0 4px';
+      const openBtn = document.createElement('button');
+      openBtn.className = 'vorsum-ctrl-btn';
+      openBtn.textContent = 'Open GitHub Issue';
+      openBtn.style.cssText =
+        'flex:1;padding:7px 8px;border-width:1px;border-style:solid;border-radius:4px;cursor:pointer;font-size:12px !important';
+      openBtn.addEventListener('click', () => openBugReportIssue(fieldEls));
 
-      addModalParagraph(
-        body,
-        'GitHub: https://github.com/PipettingBeaver/Vorsum'
-      );
+      const copyBtn = document.createElement('button');
+      copyBtn.className = 'vorsum-ctrl-btn';
+      copyBtn.textContent = 'Copy to Clipboard';
+      copyBtn.style.cssText = openBtn.style.cssText;
+      copyBtn.addEventListener('click', async () => {
+        const text = buildBugReportText(fieldEls);
+        try {
+          await navigator.clipboard.writeText(text);
+          copyBtn.textContent = 'Copied!';
+          setTimeout(() => (copyBtn.textContent = 'Copy to Clipboard'), 1500);
+        } catch (e) {
+          // Clipboard API blocked - surface the text so it can be copied by hand.
+          const ta = document.createElement('textarea');
+          ta.value = text;
+          ta.style.cssText =
+            'width:100%;margin-top:8px;font-size:11px !important;font-family:monospace;padding:6px;border-width:1px;border-style:solid;border-radius:3px';
+          body.appendChild(ta);
+          ta.focus();
+          ta.select();
+          copyBtn.textContent = 'Select + copy below';
+          setTimeout(() => (copyBtn.textContent = 'Copy to Clipboard'), 2500);
+        }
+      });
+
+      actionRow.appendChild(openBtn);
+      actionRow.appendChild(copyBtn);
+      body.appendChild(actionRow);
+
+      // -- Anonymous submission (no GitHub account needed) --
+      const anonBtn = document.createElement('button');
+      anonBtn.className = 'vorsum-ctrl-btn';
+      anonBtn.textContent = 'Submit Anonymously';
+      anonBtn.title = 'Emails this report straight to the developer - no GitHub account required';
+      anonBtn.style.cssText =
+        'width:100%;padding:7px 8px;border-width:1px;border-style:solid;border-radius:4px;cursor:pointer;font-size:12px !important;margin-bottom:4px';
+
+      const anonStatus = document.createElement('div');
+      anonStatus.className = 'vorsum-label';
+      anonStatus.style.cssText = 'display:none;font-size:11px !important;margin-bottom:6px;line-height:1.3';
+
+      // "Finished" look for the one-shot anonymous send: green + disabled so
+      // it can't fire again (per window) once a report has gone through.
+      function markAnonSent() {
+        anonBtn.disabled = true;
+        anonBtn.textContent = '✓ Sent';
+        anonBtn.title = 'Already sent in this window - reload the page to send another';
+        anonBtn.style.setProperty('background', '#2e7d32', 'important');
+        anonBtn.style.setProperty('color', '#ffffff', 'important');
+        anonBtn.style.setProperty('border-color', '#2e7d32', 'important');
+        anonBtn.style.setProperty('cursor', 'default', 'important');
+        anonBtn.style.setProperty('opacity', '0.75', 'important');
+      }
+
+      anonBtn.addEventListener('click', () => {
+        if (bugReportSubmitted) return;
+        anonStatus.style.display = 'block';
+        submitBugReportAnonymously(fieldEls, (text, state) => {
+          anonStatus.textContent = text;
+          if (state === 'success') markAnonSent();
+        });
+      });
+
+      // If a report was already sent earlier in this page's lifetime,
+      // reopen straight into the finished state.
+      if (bugReportSubmitted) {
+        anonStatus.style.display = 'block';
+        anonStatus.textContent = '✓ Sent. Thank you - the developer will see your report.';
+        markAnonSent();
+      }
+
+      body.appendChild(anonBtn);
+      body.appendChild(anonStatus);
+
+      // -- Bottom: collapsible auto-populated telemetry --
+      const detailsBodyId = `vorsum-bug-details-${Math.random().toString(36).slice(2, 8)}`;
+      const detailsToggle = document.createElement('button');
+      detailsToggle.type = 'button';
+      detailsToggle.className = 'vorsum-ctrl-btn';
+      detailsToggle.textContent = '▸ Auto-populated details (browser, manager, mode, page URL, debug log)';
+      detailsToggle.style.cssText =
+        'width:100%;padding:5px 8px;border-width:1px;border-style:solid;border-radius:4px;cursor:pointer;font-size:11px !important;text-align:left;opacity:0.65';
+      detailsToggle.setAttribute('aria-expanded', 'false');
+      detailsToggle.setAttribute('aria-controls', detailsBodyId);
+      const detailsBody = document.createElement('div');
+      detailsBody.id = detailsBodyId;
+      detailsBody.style.cssText = 'display:none;margin-top:8px';
+      detailsToggle.addEventListener('click', () => {
+        const showing = detailsBody.style.display !== 'none';
+        detailsBody.style.display = showing ? 'none' : 'block';
+        detailsToggle.setAttribute('aria-expanded', String(!showing));
+        detailsToggle.textContent = `${showing ? '▸' : '▾'} Auto-populated details (browser, manager, mode, page URL, debug log)`;
+      });
+      body.appendChild(detailsToggle);
+      body.appendChild(detailsBody);
+
+      field(detailsBody, 'Browser and version', 'browser', {
+        rows: 2,
+        value: getBrowserInfoString(),
+        refresh: getBrowserInfoString
+      });
+      field(detailsBody, 'Userscript manager and version', 'manager', {
+        rows: 2,
+        value: getUserscriptManagerString(),
+        refresh: getUserscriptManagerString
+      });
+      field(detailsBody, 'Mode and API provider', 'mode', {
+        rows: 2,
+        value: getModeProviderString(),
+        refresh: getModeProviderString
+      });
+      field(detailsBody, 'Page URL', 'pageUrl', { rows: 1, value: location.href });
+      field(detailsBody, 'Debug log (Options → Troubleshooting → Debug: ON)', 'log', {
+        rows: 8,
+        value: logBuffer.map((e) => e.line).join('\n'),
+        refresh: () => logBuffer.map((e) => e.line).join('\n'),
+        mono: true
+      });
+
+      // Built after showSimpleModal's own theme sweep, so register explicitly.
+      registerThemedSubtree(body);
     });
   }
 
@@ -2093,6 +2671,14 @@
   const RATE_LIMIT_COOLDOWN_MS = 5 * 60 * 1000; // 5 min - a quota error won't clear in seconds, so stop hammering it
   let rateLimitedUntil = 0;
   let rateLimitNoticeEl = null;
+
+  // When URL mode is rejected by the API with a 403 permission error (the
+  // video-URI input isn't allowed for the account/key), we fall back to
+  // caption mode on that same click. This flag stops an infinite
+  // URL -> caption -> URL loop if captions are also unavailable/blocked:
+  // once URL mode has been tried and 403'd, don't bounce BACK to it from a
+  // failed caption fetch. Reset on each fresh (user-initiated) click.
+  let urlModePermissionRejected = false;
 
   function isRateLimited() {
     return Date.now() < rateLimitedUntil;
@@ -2488,7 +3074,7 @@
     helpBtn.textContent = '?';
     helpBtn.title = 'About vorsum / replay the intro';
     helpBtn.style.cssText = squareBtnStyle;
-    helpBtn.addEventListener('click', () => showOnboarding(3));
+    helpBtn.addEventListener('click', () => showOnboarding(7));
 
     row1.appendChild(title);
     row1.appendChild(historyBtn);
@@ -2524,7 +3110,7 @@
     updateNotice.className = 'vorsum-banner';
     updateNotice.style.cssText =
       'display:none;padding:5px 6px;font-size:10px !important;border-width:1px;border-style:solid;border-radius:3px;cursor:pointer;text-align:center';
-    updateNotice.title = 'Open the vorsum repo on GitHub';
+    updateNotice.title = 'Open the vorsum userscript install URL';
     updateNotice.addEventListener('click', () => window.open(REPO_PAGE_URL, '_blank'));
     updateNoticeEl = updateNotice;
 
@@ -2593,41 +3179,16 @@
 
     const statsBtn = document.createElement('button');
     statsBtn.className = 'vorsum-ctrl-btn';
-    statsBtn.textContent = 'Stats';
+    statsBtn.textContent = 'Stats & Data';
     statsBtn.style.cssText = btnStyle + ';flex:1;text-align:center';
     statsBtn.addEventListener('click', showHistoryStatsModal);
 
     loadMoreRow.appendChild(loadMoreBtn);
     loadMoreRow.appendChild(statsBtn);
 
-    const clearHistoryBtn = document.createElement('button');
-    clearHistoryBtn.className = 'vorsum-ctrl-btn vorsum-danger-btn';
-    clearHistoryBtn.textContent = 'Clear all history';
-    clearHistoryBtn.style.cssText = btnStyle;
-
-    const exportRow = document.createElement('div');
-    exportRow.style.cssText = 'display:flex;gap:4px';
-
-    const exportJsonBtn = document.createElement('button');
-    exportJsonBtn.className = 'vorsum-ctrl-btn';
-    exportJsonBtn.textContent = 'Export JSON';
-    exportJsonBtn.style.cssText = btnStyle + ';flex:1;text-align:center';
-    exportJsonBtn.addEventListener('click', () => exportHistory('json'));
-
-    const exportCsvBtn = document.createElement('button');
-    exportCsvBtn.className = 'vorsum-ctrl-btn';
-    exportCsvBtn.textContent = 'Export CSV';
-    exportCsvBtn.style.cssText = btnStyle + ';flex:1;text-align:center';
-    exportCsvBtn.addEventListener('click', () => exportHistory('csv'));
-
-    exportRow.appendChild(exportJsonBtn);
-    exportRow.appendChild(exportCsvBtn);
-
     historyPanel.appendChild(searchInput);
     historyPanel.appendChild(historyList);
     historyPanel.appendChild(loadMoreRow);
-    historyPanel.appendChild(exportRow);
-    historyPanel.appendChild(clearHistoryBtn);
 
     // -- options panel (accessibility + prompt customization) --
     const optionsPanel = document.createElement('div');
@@ -2638,14 +3199,24 @@
       const section = document.createElement('div');
       section.style.cssText = 'display:flex;flex-direction:column;gap:4px;margin-top:8px';
 
+      const bodyId = `vorsum-section-${Math.random().toString(36).slice(2, 8)}`;
+
       const header = document.createElement('button');
+      header.type = 'button';
       header.className = 'vorsum-ctrl-btn';
       header.style.cssText = btnStyle + ';width:100%;text-align:left;display:flex;justify-content:space-between;align-items:center';
+      // Standard disclosure semantics: a real <button> that reports its
+      // expanded state and points at the region it controls, so screen
+      // readers announce "expanded/collapsed" and keyboard users can toggle
+      // with Enter/Space.
+      header.setAttribute('aria-expanded', String(initiallyOpen));
+      header.setAttribute('aria-controls', bodyId);
 
       const headerText = document.createElement('span');
       headerText.textContent = title;
 
       const arrow = document.createElement('span');
+      arrow.setAttribute('aria-hidden', 'true');
       arrow.textContent = initiallyOpen ? '▴' : '▾';
       arrow.style.cssText = 'font-size:10px !important';
 
@@ -2653,143 +3224,59 @@
       header.appendChild(arrow);
 
       const body = document.createElement('div');
+      body.id = bodyId;
+      body.setAttribute('role', 'region');
+      body.setAttribute('aria-label', title);
       body.style.cssText = `display:${initiallyOpen ? 'flex' : 'none'};flex-direction:column;gap:4px;margin-top:4px;padding-left:8px`;
 
+      function setOpen(open) {
+        body.style.display = open ? 'flex' : 'none';
+        arrow.textContent = open ? '\u25b4' : '\u25be';
+        header.setAttribute('aria-expanded', String(open));
+      }
+
       header.addEventListener('click', () => {
-        const isOpen = body.style.display !== 'none';
-        body.style.display = isOpen ? 'none' : 'flex';
-        arrow.textContent = isOpen ? '▾' : '▴';
+        setOpen(body.style.display === 'none');
       });
 
       section.appendChild(header);
       section.appendChild(body);
       registerThemedEl(header);
 
-      return { section, body };
+      return { section, body, header, setOpen };
     }
 
-    // -- API key (view/test/change) --
+    // -- API provider intro --
     const apiKeyLabel = document.createElement('div');
     apiKeyLabel.className = 'vorsum-label';
     apiKeyLabel.style.cssText = 'font-size:10px !important';
-    apiKeyLabel.textContent = "API provider selected here. Google's Gemini has free API access, and is the only provider that works with URL mode.";
+    apiKeyLabel.textContent =
+      "Google's Gemini has free API access, and is the only provider that works with URL mode. Other providers or local endpoints are also available.";
 
-    const apiKeyRow = document.createElement('div');
-    apiKeyRow.style.cssText = 'display:flex;align-items:center;gap:4px;margin-bottom:8px';
-
-    const apiKeyValue = document.createElement('span');
-    apiKeyValue.style.cssText = 'flex:1;font-family:monospace;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
-
-    const apiKeyTestBtn = document.createElement('button');
-    apiKeyTestBtn.className = 'vorsum-ctrl-btn';
-    apiKeyTestBtn.textContent = 'Test';
-    apiKeyTestBtn.style.cssText = btnStyle + ';padding:2px 8px;text-align:center';
-
-    const apiKeyChangeBtn = document.createElement('button');
-    apiKeyChangeBtn.className = 'vorsum-ctrl-btn';
-    apiKeyChangeBtn.textContent = 'Change';
-    apiKeyChangeBtn.style.cssText = btnStyle + ';padding:2px 8px;text-align:center';
-
-    function maskApiKey(key) {
-      if (!key) return '(not set)';
-      if (key.length <= 8) return '•'.repeat(key.length);
-      return `${key.slice(0, 4)}${'•'.repeat(Math.max(4, key.length - 8))}${key.slice(-4)}`;
-    }
-    function renderApiKeyValue() {
-      apiKeyValue.textContent = maskApiKey(GM_getValue('gemini_api_key', ''));
-    }
-
-    apiKeyChangeBtn.addEventListener('click', () => {
-      const next = prompt('Enter your Gemini API key (from aistudio.google.com):', '') || '';
-      if (next) {
-        GM_setValue('gemini_api_key', next);
-        setOnboarded(true); // a real key now exists somewhere - stop nagging on every load
-        renderNoKeyNotice();
-        renderApiKeyValue();
-        log('API key updated');
-      }
+    // Gemini API key input. Lives inline in the provider fields below (shown
+    // only when Gemini is the selected provider) rather than as its own row
+    // up here, so all three providers present the same single text-bar shape.
+    // The shared Test button in llmTestRow covers testing it (Gemini's
+    // adapter is what that button already uses when Gemini is selected).
+    const geminiKeyInput = document.createElement('input');
+    geminiKeyInput.type = 'password';
+    geminiKeyInput.className = 'vorsum-search-input';
+    geminiKeyInput.placeholder = 'Gemini API key';
+    geminiKeyInput.style.cssText = 'font-size:11px !important;padding:3px 5px;border-width:1px;border-style:solid;border-radius:3px;width:100%';
+    geminiKeyInput.value = GM_getValue('gemini_api_key', '');
+    geminiKeyInput.addEventListener('change', () => {
+      GM_setValue('gemini_api_key', geminiKeyInput.value);
+      if (geminiKeyInput.value) setOnboarded(true); // a real key now exists - stop nagging on every load
+      renderNoKeyNotice();
+      log('Gemini API key updated');
     });
-
-    apiKeyTestBtn.addEventListener('click', () => {
-      const key = GM_getValue('gemini_api_key', '');
-      if (!key) {
-        apiKeyTestBtn.textContent = 'No key set';
-        setTimeout(() => (apiKeyTestBtn.textContent = 'Test'), 2000);
-        return;
-      }
-      apiKeyTestBtn.textContent = 'Testing…';
-      apiKeyTestBtn.disabled = true;
-      log('Testing API key...');
-      GM_xmlhttpRequest({
-        method: 'POST',
-        url: `https://generativelanguage.googleapis.com/v1beta/interactions?key=${key}`,
-        headers: { 'Content-Type': 'application/json', 'Api-Revision': '2026-05-20' },
-        timeout: 15000,
-        data: JSON.stringify({ model: MODEL, input: [{ type: 'text', text: 'Reply with only the word: OK' }] }),
-        onload: (res) => {
-          apiKeyTestBtn.disabled = false;
-          let data = null;
-          try {
-            data = JSON.parse(res.responseText);
-          } catch (e) {
-            /* leave data null, handled below */
-          }
-          // Same check as the Options/Caption-mode LLM test and
-          // onboarding's own Test & Save - requires actual generated
-          // text, not just the absence of an .error field. A malformed
-          // key can come back as a 200 with no error object AND no real
-          // text, which read as "success" before this fix.
-          const result = data ? LLM_PROVIDERS.gemini.parseResponse(data) : { error: `HTTP ${res.status}, invalid JSON` };
-          if (result.text) {
-            apiKeyTestBtn.textContent = '✓ Works';
-            apiKeyTestBtn.title = '';
-            log('API key test succeeded');
-          } else {
-            const msg = result.error || `HTTP ${res.status}`;
-            apiKeyTestBtn.textContent = '✗ Failed';
-            apiKeyTestBtn.title = msg;
-            log(`API key test failed: ${msg}`, 'warn');
-          }
-          setTimeout(() => {
-            apiKeyTestBtn.textContent = 'Test';
-            apiKeyTestBtn.title = '';
-          }, 4000);
-        },
-        ontimeout: () => {
-          apiKeyTestBtn.disabled = false;
-          apiKeyTestBtn.textContent = '✗ Timeout';
-          log('API key test timed out', 'warn');
-          setTimeout(() => (apiKeyTestBtn.textContent = 'Test'), 4000);
-        },
-        onerror: () => {
-          apiKeyTestBtn.disabled = false;
-          apiKeyTestBtn.textContent = '✗ Error';
-          log('API key test: network error', 'warn');
-          setTimeout(() => (apiKeyTestBtn.textContent = 'Test'), 4000);
-        }
-      });
-    });
-
-    apiKeyRow.appendChild(apiKeyValue);
-    apiKeyRow.appendChild(apiKeyTestBtn);
-    apiKeyRow.appendChild(apiKeyChangeBtn);
 
 
     // -- Caption mode LLM provider (URL mode stays Gemini-only, see the
     // comment on LLM_PROVIDERS for why) --
-    const llmLabel = document.createElement('div');
-    llmLabel.className = 'vorsum-label';
-    llmLabel.style.cssText = 'font-size:10px !important;margin-top:8px';
-    llmLabel.textContent = 'Caption mode LLM provider';
-
-    const llmDisclaimer = document.createElement('div');
-    llmDisclaimer.className = 'vorsum-label';
-    llmDisclaimer.style.cssText = 'font-size:10px !important;line-height:1.3;margin-bottom:4px';
-    llmDisclaimer.textContent =
-      'Caption mode only ever sees the video\'s transcript text - no visuals, tone, on-screen text, or audio beyond speech. URL mode (Gemini only) watches the actual video and is more capable, at the cost of being slower.';
-
     const llmProviderSelect = document.createElement('select');
     llmProviderSelect.className = 'vorsum-select';
+    llmProviderSelect.setAttribute('aria-label', 'API provider for Caption mode');
     llmProviderSelect.style.cssText = 'font-size:11px !important;padding:3px 5px;border-width:1px;border-style:solid;border-radius:3px;width:100%';
     Object.entries(LLM_PROVIDERS).forEach(([key, p]) => {
       const opt = document.createElement('option');
@@ -2830,13 +3317,8 @@
     oaiModelInput.placeholder = LLM_PROVIDERS.openai_compatible.modelPlaceholder;
     oaiModelInput.style.cssText = 'font-size:11px !important;padding:3px 5px;border-width:1px;border-style:solid;border-radius:3px;margin-top:4px;width:100%';
 
-    const geminiNote = document.createElement('div');
-    geminiNote.className = 'vorsum-label';
-    geminiNote.style.cssText = 'font-size:10px !important';
-    geminiNote.textContent = 'Uses the Gemini API key above.';
-
     anthKeyRow.appendChild(anthKeyInput);
-    llmFieldsWrap.appendChild(geminiNote);
+    llmFieldsWrap.appendChild(geminiKeyInput);
     llmFieldsWrap.appendChild(anthKeyRow);
     llmFieldsWrap.appendChild(anthModelInput);
     llmFieldsWrap.appendChild(oaiKeyInput);
@@ -2861,7 +3343,7 @@
     function renderLlmFields() {
       const provider = getLlmProvider();
       llmProviderSelect.value = provider;
-      geminiNote.style.display = provider === 'gemini' ? 'block' : 'none';
+      geminiKeyInput.style.display = provider === 'gemini' ? 'block' : 'none';
       anthKeyRow.style.display = provider === 'anthropic' ? 'flex' : 'none';
       anthModelInput.style.display = provider === 'anthropic' ? 'block' : 'none';
       oaiKeyInput.style.display = provider === 'openai_compatible' ? 'block' : 'none';
@@ -2869,6 +3351,7 @@
       oaiModelInput.style.display = provider === 'openai_compatible' ? 'block' : 'none';
 
       const creds = getProviderCredentials(provider);
+      if (provider === 'gemini') geminiKeyInput.value = creds.apiKey;
       if (provider === 'anthropic') anthKeyInput.value = creds.apiKey;
       if (provider === 'openai_compatible') {
         oaiKeyInput.value = creds.apiKey;
@@ -2993,7 +3476,7 @@
 
     // -- Show transcript download button --
     const transcriptButtonRow = document.createElement('label');
-    transcriptButtonRow.style.cssText = 'display:flex;align-items:center;gap:6px;margin-top:6px;font-size:11px;cursor:pointer';
+    transcriptButtonRow.style.cssText = 'display:flex;align-items:center;gap:6px;margin-top:2px;font-size:11px;cursor:pointer';
     const transcriptButtonCheckbox = document.createElement('input');
     transcriptButtonCheckbox.type = 'checkbox';
     transcriptButtonCheckbox.checked = getTranscriptButtonEnabled();
@@ -3004,13 +3487,27 @@
       scanForCards();
     });
     const transcriptButtonText = document.createElement('span');
-    transcriptButtonText.textContent = 'Show transcript download button (T) next to summarize button';
+    // Small outlined glyph badges so the "T" and "\u2211" read as the actual
+    // buttons rather than prose. border-color:currentColor makes them follow
+    // the themed text color with no per-theme style entry of their own.
+    const badgeStyle =
+      'display:inline-block;border-width:1px;border-style:solid;border-color:currentColor;border-radius:3px;padding:0 3px;margin:0 2px;font-size:9px !important;line-height:11px;vertical-align:middle';
+    const tBadge = document.createElement('span');
+    tBadge.textContent = 'T';
+    tBadge.style.cssText = badgeStyle;
+    const sumBadge = document.createElement('span');
+    sumBadge.textContent = '\u2211';
+    sumBadge.style.cssText = badgeStyle;
+    transcriptButtonText.appendChild(document.createTextNode('Show transcript download '));
+    transcriptButtonText.appendChild(tBadge);
+    transcriptButtonText.appendChild(document.createTextNode(' next to '));
+    transcriptButtonText.appendChild(sumBadge);
     transcriptButtonRow.appendChild(transcriptButtonCheckbox);
     transcriptButtonRow.appendChild(transcriptButtonText);
 
     // -- Hover-reveal (DeArrow-style) --
     const hoverOnlyRow = document.createElement('label');
-    hoverOnlyRow.style.cssText = 'display:flex;align-items:center;gap:6px;margin-top:6px;font-size:11px;cursor:pointer';
+    hoverOnlyRow.style.cssText = 'display:flex;align-items:center;gap:6px;margin-top:2px;font-size:11px;cursor:pointer';
     const hoverOnlyCheckbox = document.createElement('input');
     hoverOnlyCheckbox.type = 'checkbox';
     hoverOnlyCheckbox.checked = getHoverOnlyEnabled();
@@ -3020,26 +3517,20 @@
       log(`Hover-reveal: ${hoverOnlyCheckbox.checked}`);
     });
     const hoverOnlyText = document.createElement('span');
-    hoverOnlyText.textContent = `Hide \u2211 until hovering the video (auto-detected: ${isMobileDevice() ? 'touch device, off by default' : 'has hover, on by default'})`;
+    hoverOnlyText.textContent = 'Hide buttons until hovering the video';
     hoverOnlyRow.appendChild(hoverOnlyCheckbox);
     hoverOnlyRow.appendChild(hoverOnlyText);
-
-    // Dedicated "Options" header for the general section.
-    const optionsHeader = document.createElement('div');
-    optionsHeader.className = 'vorsum-label';
-    optionsHeader.style.cssText = 'font-size:11px !important;font-weight:bold;margin-top:2px';
-    optionsHeader.textContent = 'Options';
 
     // "Summary mode" heading (a simple label, not a collapsible subsection)
     // that groups the mode slider and the URL fallback toggle.
     const modeSectionLabel = document.createElement('div');
     modeSectionLabel.className = 'vorsum-label';
-    modeSectionLabel.style.cssText = 'font-size:10px !important;font-weight:bold;margin-top:8px';
+    modeSectionLabel.style.cssText = 'font-size:10px !important;font-weight:bold';
     modeSectionLabel.textContent = 'Summary mode';
 
     // -- Use URL method as fall-back --
     const fallbackUrlRow = document.createElement('label');
-    fallbackUrlRow.style.cssText = 'display:flex;align-items:center;gap:6px;margin-top:8px;font-size:11px;cursor:pointer';
+    fallbackUrlRow.style.cssText = 'display:flex;align-items:center;gap:6px;margin-top:2px;font-size:11px;cursor:pointer';
     const fallbackUrlCheckbox = document.createElement('input');
     fallbackUrlCheckbox.type = 'checkbox';
     fallbackUrlCheckbox.checked = getFallbackToUrlEnabled();
@@ -3054,8 +3545,8 @@
 
     const fontLabel = document.createElement('div');
     fontLabel.className = 'vorsum-label';
-    fontLabel.style.cssText = 'font-size:10px !important;margin-top:8px';
-    fontLabel.textContent = 'Summary text size (inline + History)';
+    fontLabel.style.cssText = 'font-size:10px !important;font-weight:bold';
+    fontLabel.textContent = 'Summary text size';
 
     const fontRow = document.createElement('div');
     fontRow.style.cssText = 'display:flex;align-items:center;gap:4px';
@@ -3091,6 +3582,19 @@
     fontRow.appendChild(fontPlusBtn);
     fontRow.appendChild(fontCurrentLabel);
 
+    // Live preview of the chosen size, sitting under the slider. Registered
+    // as a scalable summary element so applyFontSize() stamps the same
+    // inline 'important' font-size onto it that real inline + History
+    // summaries get - the preview is literally the same mechanism. The
+    // vorsum-history-row class adds the themed border color; the box's
+    // width/style/radius/padding are inline since that class only themes color.
+    const fontExampleText = document.createElement('div');
+    fontExampleText.className = 'vorsum-history-summary vorsum-history-row';
+    fontExampleText.textContent = "This is an example summary text you'd read on a page or in the History tab.";
+    fontExampleText.style.cssText =
+      'margin-top:6px;line-height:1.3;padding:5px 6px;border-width:1px;border-style:dashed;border-radius:4px';
+    registerScalableSummaryEl(fontExampleText);
+
     function renderFontRow() {
       const px = getFontSizePx();
       fontSlider.value = String(px);
@@ -3116,6 +3620,37 @@
     fontSlider.addEventListener('change', () => {
       log(`Summary font size set to ${getFontSizePx()}px`);
     });
+
+    // Shared two-column panel row: "Summary mode" (slider + URL fall-back,
+    // stacked) on the left, "Summary text size" (slider + live example) on
+    // the right. vorsum-history-row gives each box its themed border color;
+    // the border-width/style/radius are inline since that class only themes
+    // the color.
+    const summarySettingsRow = document.createElement('div');
+    summarySettingsRow.style.cssText = 'display:flex;gap:6px;align-items:stretch;margin-top:6px';
+
+    const modePanel = document.createElement('div');
+    modePanel.className = 'vorsum-history-row';
+    modePanel.style.cssText =
+      'flex:1;min-width:0;display:flex;flex-direction:column;gap:4px;padding:6px;border-width:1px;border-style:solid;border-radius:4px';
+
+    const textSizePanel = document.createElement('div');
+    textSizePanel.className = 'vorsum-history-row';
+    textSizePanel.style.cssText =
+      'flex:1;min-width:0;display:flex;flex-direction:column;gap:4px;padding:6px;border-width:1px;border-style:solid;border-radius:4px';
+
+    modePanel.appendChild(modeSectionLabel);
+    modePanel.appendChild(modeBtn);
+    modePanel.appendChild(fallbackUrlRow);
+    modePanel.appendChild(transcriptButtonRow);
+    modePanel.appendChild(hoverOnlyRow);
+
+    textSizePanel.appendChild(fontLabel);
+    textSizePanel.appendChild(fontRow);
+    textSizePanel.appendChild(fontExampleText);
+
+    summarySettingsRow.appendChild(modePanel);
+    summarySettingsRow.appendChild(textSizePanel);
 
     const promptLabel = document.createElement('div');
     promptLabel.className = 'vorsum-label';
@@ -3163,7 +3698,21 @@
     const cacheSizeLine = document.createElement('span');
     cacheSizeLine.className = 'vorsum-label';
     cacheSizeLine.style.cssText = 'flex:1;font-size:10px !important';
-    cacheSizeLine.textContent = 'Cache: —';
+    cacheSizeLine.textContent = 'Local cache: —';
+
+    const statsDataBtn = document.createElement('button');
+    statsDataBtn.className = 'vorsum-ctrl-btn';
+    statsDataBtn.textContent = 'Stats & Data';
+    statsDataBtn.style.cssText = btnStyle + ';text-align:center';
+    statsDataBtn.addEventListener('click', showHistoryStatsModal);
+
+    // FAQ sits next to Data & Privacy (same button styling/dimensions), with
+    // Stats & Data to its left. All three share the cache-size row.
+    const faqBtn = document.createElement('button');
+    faqBtn.className = 'vorsum-ctrl-btn';
+    faqBtn.textContent = 'FAQ';
+    faqBtn.style.cssText = btnStyle + ';text-align:center';
+    faqBtn.addEventListener('click', () => showOnboarding(7));
 
     const dataDesignBtn = document.createElement('button');
     dataDesignBtn.className = 'vorsum-ctrl-btn';
@@ -3174,13 +3723,15 @@
     async function refreshCacheSizeLine() {
       try {
         const info = await getCacheSizeInfo();
-        cacheSizeLine.textContent = `Cache: ${info.historyCount} video${info.historyCount === 1 ? '' : 's'} · ${formatBytes(info.totalBytes)}`;
+        cacheSizeLine.textContent = `Local cache: ${info.historyCount} video${info.historyCount === 1 ? '' : 's'} · ${formatBytes(info.totalBytes)}`;
       } catch (e) {
-        cacheSizeLine.textContent = 'Cache: (unavailable)';
+        cacheSizeLine.textContent = 'Local cache: (unavailable)';
       }
     }
 
     dataRow.appendChild(cacheSizeLine);
+    dataRow.appendChild(statsDataBtn);
+    dataRow.appendChild(faqBtn);
     dataRow.appendChild(dataDesignBtn);
 
     // Debugging label (for collapsible section later)
@@ -3189,37 +3740,18 @@
     debugLabel.style.cssText = 'font-size:10px !important;margin-bottom:4px';
     debugLabel.textContent = 'Debug log';
 
-    // ---- REORGANIZED OPTIONS PANEL ----
-    // Easy access items at the top
-    optionsPanel.appendChild(optionsHeader);
-    optionsPanel.appendChild(modeSectionLabel);
-    optionsPanel.appendChild(modeBtn);
-    optionsPanel.appendChild(fallbackUrlRow);
-    optionsPanel.appendChild(fontLabel);
-    optionsPanel.appendChild(fontRow);
-    optionsPanel.appendChild(transcriptButtonRow);
-    optionsPanel.appendChild(hoverOnlyRow);
-
-    // FAQ/Help button (links to onboarding)
-    const faqBtn = document.createElement('button');
-    faqBtn.className = 'vorsum-ctrl-btn';
-    faqBtn.textContent = '❓ FAQ / Show intro again';
-    faqBtn.style.cssText = btnStyle + ';width:100%;text-align:center;margin-top:6px';
-    faqBtn.addEventListener('click', () => showOnboarding(3));
-    optionsPanel.appendChild(faqBtn);
-    registerThemedEl(faqBtn);
-
-    // Data & Privacy at top
-    optionsPanel.appendChild(dataRow);
+    // ---- OPTIONS PANEL ----
+    // Summary Configuration is the most-used section, so it opens by default
+    // (the same accordion widget as the others).
+    const summarySection = createCollapsibleSection('Summary Configuration', true);
+    summarySection.body.appendChild(summarySettingsRow);
+    optionsPanel.appendChild(summarySection.section);
 
     // ---- COLLAPSIBLE SECTIONS ----
 
     // 1. API Configuration
     const apiSection = createCollapsibleSection('API Configuration', false);
     apiSection.body.appendChild(apiKeyLabel);
-    apiSection.body.appendChild(apiKeyRow);
-    apiSection.body.appendChild(llmLabel);
-    apiSection.body.appendChild(llmDisclaimer);
     apiSection.body.appendChild(llmProviderSelect);
     apiSection.body.appendChild(llmFieldsWrap);
     apiSection.body.appendChild(llmTestRow);
@@ -3237,20 +3769,35 @@
     // 3. Troubleshooting
     const troubleshootSection = createCollapsibleSection('Troubleshooting', false);
 
-    // Developer Contact button
+    // Developer Contact + Bug Report, side by side
     const devContactBtn = document.createElement('button');
     devContactBtn.className = 'vorsum-ctrl-btn';
     devContactBtn.textContent = '📧 Developer Contact';
-    devContactBtn.style.cssText = btnStyle + ';width:100%;text-align:center;margin-bottom:6px';
+    devContactBtn.style.cssText = btnStyle + ';flex:1;text-align:center';
     devContactBtn.addEventListener('click', showDeveloperContactModal);
-    troubleshootSection.body.appendChild(devContactBtn);
+
+    const bugReportBtn = document.createElement('button');
+    bugReportBtn.className = 'vorsum-ctrl-btn';
+    bugReportBtn.textContent = '🐞 Set up bug report';
+    bugReportBtn.style.cssText = btnStyle + ';flex:1;text-align:center';
+    bugReportBtn.addEventListener('click', showBugReportModal);
+
+    const troubleshootBtnRow = document.createElement('div');
+    troubleshootBtnRow.style.cssText = 'display:flex;gap:4px;margin-bottom:6px';
+    troubleshootBtnRow.appendChild(devContactBtn);
+    troubleshootBtnRow.appendChild(bugReportBtn);
+    troubleshootSection.body.appendChild(troubleshootBtnRow);
     registerThemedEl(devContactBtn);
+    registerThemedEl(bugReportBtn);
 
     troubleshootSection.body.appendChild(debugLabel);
     troubleshootSection.body.appendChild(debugBtn);
     troubleshootSection.body.appendChild(logPanel);
     troubleshootSection.body.appendChild(logButtonsRow);
     optionsPanel.appendChild(troubleshootSection.section);
+
+    // Bottom row: Local cache + Stats & Data / FAQ / Data & Privacy
+    optionsPanel.appendChild(dataRow);
 
 
     function renderModeBtn() {
@@ -3267,11 +3814,19 @@
       modeBtn.title =
         (url ? 'Mode: URL (Gemini watches the video)' : 'Mode: Captions (transcript, selectable LLM)') +
         ' - click to switch';
+
+      // The URL fall-back only has meaning in Caption mode - it's the
+      // "captions unavailable, use URL instead" escape hatch. In URL mode
+      // there's nothing to fall back from, so grey it out and disable it.
+      fallbackUrlCheckbox.disabled = url;
+      fallbackUrlRow.style.opacity = url ? '0.5' : '1';
+      fallbackUrlRow.style.cursor = url ? 'not-allowed' : 'pointer';
+      fallbackUrlRow.title = url ? 'Only applies to Caption mode' : '';
     }
 
     function renderDebugBtn() {
       const on = getDebugOn();
-      debugBtn.textContent = on ? 'Debug: ON' : 'Debug: off';
+      debugBtn.textContent = on ? 'Hide debug log' : 'Show debug log';
       logPanel.style.display = on ? 'block' : 'none';
       logButtonsRow.style.display = on ? 'flex' : 'none';
     }
@@ -3426,14 +3981,6 @@
 
     loadMoreBtn.addEventListener('click', () => loadHistory(false));
 
-    clearHistoryBtn.addEventListener('click', async () => {
-      if (!confirm('Delete all vorsum summary history? This cannot be undone.')) return;
-      await historyClearAll();
-      historyList.replaceChildren();
-      log('History: cleared all entries', 'warn');
-      loadHistory(true);
-    });
-
     function renderThemeBtn() {
       const theme = getTheme();
       const dark = theme === 'dark';
@@ -3484,6 +4031,7 @@
       historyPanel.style.display = 'none';
       historyPanelOpen = false;
       refreshCacheSizeLine();
+      renderLlmFields(); // re-read stored keys each open (e.g. a key saved via onboarding since the panel was built)
     }
 
     historyBtn.addEventListener('click', () => {
@@ -3546,6 +4094,7 @@
     openCaptionProviderSettings = () => {
       expand();
       showOptionsPanel();
+      apiSection.setOpen(true); // reveal API Configuration (the fields live inside it)
       llmProviderSelect.scrollIntoView({ block: 'center' });
       llmProviderSelect.focus();
     };
@@ -3564,7 +4113,6 @@
     renderModeBtn();
     renderDebugBtn();
     renderFontRow();
-    renderApiKeyValue();
     renderLlmFields();
 
     document.documentElement.appendChild(panel);
@@ -3592,7 +4140,7 @@
     if (onboardingModalOpen) return; // don't stack a second modal if already open
     onboardingModalOpen = true;
 
-    let screen = Math.min(3, Math.max(1, startScreen));
+    let screen = Math.min(7, Math.max(1, startScreen));
     let advancedOpen = false;
     let countdownTimer = null;
 
@@ -3601,37 +4149,62 @@
     backdrop.style.cssText =
       'position:fixed;top:0;left:0;right:0;bottom:0;z-index:2147483647;display:flex;align-items:center;justify-content:center;padding:16px';
 
+    // Fixed modal bounds so the container never jumps between slides. The
+    // dimensions are chosen to fit the largest slide (the wide horizontal
+    // mode diagram, and the tallest text slide), and stay put for the whole
+    // session regardless of which slide is showing.
+    const modalWidth = Math.min(isWideLayout() ? 1180 : 480, window.innerWidth - 32);
+    const modalHeight = Math.min(Math.round(window.innerHeight * 0.85), 640);
+
     const modal = document.createElement('div');
     modal.className = 'vorsum-modal';
     modal.style.cssText =
-      'max-width:480px;width:100%;max-height:85vh;overflow-y:auto;border-width:1px;border-style:solid;border-radius:6px;padding:16px;font-family:sans-serif;font-size:13px;line-height:1.5;box-shadow:0 4px 20px rgba(0,0,0,0.35)';
+      `display:flex;flex-direction:column;width:${modalWidth}px;max-width:100%;height:${modalHeight}px;max-height:85vh;` +
+      'overflow:hidden;border-width:1px;border-style:solid;border-radius:6px;padding:16px;font-family:sans-serif;font-size:13px;line-height:1.5;box-shadow:0 4px 20px rgba(0,0,0,0.35)';
 
+    // Progress dots live above the scroll area (fixed, top-right) so they
+    // never move when slide content scrolls or changes.
+    const dotsEl = document.createElement('div');
+    dotsEl.style.cssText =
+      'display:flex;justify-content:flex-end;gap:3px;margin-bottom:8px;font-size:12px;line-height:1;flex:0 0 auto';
+    dotsEl.setAttribute('role', 'img');
+
+    // Scrolling slide area; each slide's content is wrapped and animated.
     const body = document.createElement('div');
+    body.style.cssText = 'flex:1;min-height:0;overflow-y:auto';
+
+    // Fixed footer holding the step's buttons (Skip/Back/Next/Done) at the
+    // same left/right positions on every slide, pinned to the modal's own
+    // bottom margin rather than living inside the scrolling content.
+    const footerEl = document.createElement('div');
+    footerEl.style.cssText = 'flex:0 0 auto;margin-top:10px';
+
+    modal.appendChild(dotsEl);
     modal.appendChild(body);
+    modal.appendChild(footerEl);
     backdrop.appendChild(modal);
     document.documentElement.appendChild(backdrop);
 
     function close() {
       if (countdownTimer) clearInterval(countdownTimer);
-      // Reaching screen 3 requires a saved key (gated on screen 2's "\u2192
-      // How to use vorsum" button), so exiting from screen 3 - by any
-      // means - is the actual finish condition, not just opening the modal
-      // or saving a key on screen 2.
-      if (screen === 3) setOnboarded(true);
+      // Reaching the final screen (7) requires a saved key (screen 6's
+      // "\u2192 How to use vorsum" button is gated on having one), so exiting
+      // from screen 7 - by any means - is the actual finish condition.
+      if (screen === 7) setOnboarded(true);
       backdrop.remove();
       onboardingModalOpen = false;
       document.removeEventListener('keydown', onKeydown);
     }
     function onKeydown(e) {
-      // Only allow Escape to close on screen 3, matching the click-outside behavior
-      if (e.key === 'Escape' && screen === 3) close();
+      // Only allow Escape to close on the final screen, matching the click-outside behavior
+      if (e.key === 'Escape' && screen === 7) close();
     }
-    // Click-outside-to-close is intentionally absent on screens 1-2 (see
-    // the comment above), but re-enabled specifically for screen 3, since
-    // "clicking off" the final screen is the described way to finish -
-    // and at that point there's nothing left to accidentally lose.
+    // Click-outside-to-close is intentionally absent on screens 1-6 (so a
+    // stray click can't lose setup progress), but re-enabled specifically for
+    // screen 7, since "clicking off" the final screen is the described way to
+    // finish - and at that point there's nothing left to accidentally lose.
     backdrop.addEventListener('click', (e) => {
-      if (e.target === backdrop && screen === 3) close();
+      if (e.target === backdrop && screen === 7) close();
     });
     document.addEventListener('keydown', onKeydown);
 
@@ -3651,6 +4224,169 @@
       p.style.cssText = small ? 'margin:0 0 10px;font-size:11px;color:inherit;opacity:0.8' : 'margin:0 0 12px';
       return p;
     }
+    // Like para(), but for paragraphs that embed inline elements (e.g. a ∑ chip).
+    function paraNodes(parts, small) {
+      const p = document.createElement('p');
+      p.style.cssText = small ? 'margin:0 0 10px;font-size:11px;color:inherit;opacity:0.8' : 'margin:0 0 12px';
+      parts.forEach((part) => p.appendChild(typeof part === 'string' ? document.createTextNode(part) : part));
+      return p;
+    }
+    // Inline ∑ that looks like the real Summarize button - the same treatment
+    // as the mock button on the last slide, standardized here so every
+    // appearance of ∑ in the intro reads as a button.
+    function makeSumChip(cached) {
+      const el = document.createElement('span');
+      // vorsum-btn-cached is the blue "already summarized" tint used on the
+      // real buttons (its theme entry overrides the base vorsum-btn colors).
+      el.className = cached ? 'vorsum-btn vorsum-btn-cached' : 'vorsum-btn';
+      el.textContent = '\u2211';
+      el.setAttribute('aria-hidden', 'true');
+      el.style.cssText =
+        'display:inline-flex;align-items:center;justify-content:center;min-width:26px;height:22px;padding:0 5px;border-width:1px;border-style:solid;border-radius:3px;font-size:13px !important;line-height:1;vertical-align:middle;margin:0 2px';
+      registerThemedEl(el);
+      return el;
+    }
+    // Same light/dark pill toggle as the widget's Options menu, reused on the
+    // welcome slide. Toggling re-renders so the slide's fixed-color
+    // illustration picks up the new palette immediately.
+    function makeThemeToggle() {
+      const dark = getTheme() === 'dark';
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'vorsum-ctrl-btn';
+      btn.setAttribute('aria-label', 'Toggle light/dark theme');
+      btn.style.cssText =
+        'position:relative;width:40px;height:20px;border-radius:10px;border-width:1px;border-style:solid;padding:0;cursor:pointer;flex-shrink:0';
+      btn.style.background = dark ? '#444444' : '#dddddd';
+      btn.style.borderColor = dark ? '#666666' : '#bbbbbb';
+      const knob = document.createElement('span');
+      knob.style.cssText =
+        'position:absolute;top:2px;width:14px;height:14px;border-radius:50%;background:#ffffff;box-shadow:0 0 2px rgba(0,0,0,0.4);transition:left 0.15s ease';
+      knob.style.left = dark ? '22px' : '2px';
+      btn.appendChild(knob);
+      btn.addEventListener('click', () => {
+        setTheme(getTheme() === 'dark' ? 'light' : 'dark');
+        applyTheme();
+        render();
+      });
+      return btn;
+    }
+    // Visual mock of Google AI Studio's primary "Create API key" button, so
+    // the setup instructions match what people actually see on that page.
+    function makeGoogleButtonMock() {
+      const btn = document.createElement('span');
+      btn.style.cssText =
+        'display:inline-flex;align-items:center;gap:4px;background:#ffffff;color:#202124;font-size:11px;font-weight:500;padding:2px 8px;border-radius:4px;border:1px solid #dadce0;vertical-align:middle;margin:0 3px;box-shadow:0 1px 2px rgba(0,0,0,0.15)';
+      const icon = document.createElement('span');
+      icon.setAttribute('aria-hidden', 'true');
+      icon.textContent = '\ud83d\udd11';
+      icon.style.cssText = 'font-size:10px;line-height:1';
+      btn.appendChild(icon);
+      btn.appendChild(document.createTextNode('Create API key'));
+      return btn;
+    }
+    // Interactive copy of the Options URL/Caption toggle + URL fall-back,
+    // reused on the recap slide so a preference can be set inline.
+    function makeModeSelector() {
+      const wrap = document.createElement('div');
+      wrap.style.cssText = 'display:flex;flex-direction:column;align-items:center;gap:6px';
+
+      const modeBtn = document.createElement('button');
+      modeBtn.type = 'button';
+      modeBtn.setAttribute('aria-label', 'Toggle URL / Caption mode');
+      modeBtn.style.cssText =
+        'position:relative;width:78px;height:16px;border-radius:8px;border-width:1px;border-style:solid;padding:0;cursor:pointer;flex-shrink:0;overflow:hidden';
+      const knob = document.createElement('span');
+      knob.style.cssText =
+        'position:absolute;top:1px;width:38px;height:12px;border-radius:6px;background:#ffffff;box-shadow:0 0 2px rgba(0,0,0,0.35);transition:left 0.15s ease;pointer-events:none';
+      const urlLabel = document.createElement('span');
+      urlLabel.textContent = 'URL';
+      urlLabel.style.cssText =
+        'position:absolute;left:0;top:0;width:39px;line-height:14px;text-align:center;font-size:9px !important;font-weight:bold;pointer-events:none;z-index:1';
+      const capLabel = document.createElement('span');
+      capLabel.textContent = 'Caption';
+      capLabel.style.cssText =
+        'position:absolute;right:0;top:0;width:39px;line-height:14px;text-align:center;font-size:9px !important;font-weight:bold;pointer-events:none;z-index:1';
+      modeBtn.append(knob, urlLabel, capLabel);
+
+      const fallbackRow = document.createElement('label');
+      fallbackRow.style.cssText = 'display:flex;align-items:center;gap:6px;font-size:11px;cursor:pointer';
+      const fallbackCheckbox = document.createElement('input');
+      fallbackCheckbox.type = 'checkbox';
+      fallbackCheckbox.checked = getFallbackToUrlEnabled();
+      const fallbackText = document.createElement('span');
+      fallbackText.textContent = 'Use URL method as fall-back';
+      fallbackRow.append(fallbackCheckbox, fallbackText);
+
+      function renderState() {
+        const url = getMode() === 'url';
+        const dark = getTheme() === 'dark';
+        modeBtn.style.background = dark ? '#444444' : '#dddddd';
+        modeBtn.style.borderColor = dark ? '#666666' : '#bbbbbb';
+        knob.style.left = url ? '1px' : '39px';
+        const active = '#333333';
+        const inactive = dark ? '#9a9a9a' : '#8a8a8a';
+        urlLabel.style.color = url ? active : inactive;
+        capLabel.style.color = url ? inactive : active;
+        fallbackCheckbox.disabled = url;
+        fallbackRow.style.opacity = url ? '0.5' : '1';
+        fallbackRow.style.cursor = url ? 'not-allowed' : 'pointer';
+        fallbackRow.title = url ? 'Only applies to Caption mode' : '';
+      }
+      modeBtn.addEventListener('click', () => {
+        setMode(getMode() === 'url' ? 'transcript' : 'url');
+        renderState();
+      });
+      fallbackCheckbox.addEventListener('change', () => {
+        setFallbackToUrlEnabled(fallbackCheckbox.checked);
+        log(`Use URL method as fall-back: ${fallbackCheckbox.checked}`);
+      });
+      renderState();
+
+      wrap.append(modeBtn, fallbackRow);
+      return wrap;
+    }
+    // Static copy of the collapsed floating widget dot (V∑), for the recap slide.
+    function makeWidgetDotMock() {
+      const dot = document.createElement('div');
+      dot.textContent = 'V\u2211';
+      dot.setAttribute('aria-hidden', 'true');
+      dot.style.cssText =
+        'width:44px;height:44px;border-radius:50%;background:#f4f4f4;color:#333333;border:1px solid #cccccc;display:flex;align-items:center;justify-content:center;font-size:16px;font-weight:bold;font-family:sans-serif;line-height:1;box-shadow:0 2px 6px rgba(0,0,0,0.35);user-select:none;flex:0 0 auto';
+      return dot;
+    }
+    // Inline SVG helpers - Trusted Types CSP blocks innerHTML, so icons are
+    // assembled node-by-node. Matches the icons in vorsum-how-it-works.html.
+    const SVG_NS = 'http://www.w3.org/2000/svg';
+    function svgEl(tag, attrs) {
+      const el = document.createElementNS(SVG_NS, tag);
+      for (const k in attrs) el.setAttribute(k, attrs[k]);
+      return el;
+    }
+    function makeGeminiIcon() {
+      const svg = svgEl('svg', { width: '30', height: '30', viewBox: '0 0 34 34', fill: 'none' });
+      svg.appendChild(
+        svgEl('path', {
+          d: 'M17 3 C17 10 20 13 27 13 C20 13 17 16 17 23 C17 16 14 13 7 13 C14 13 17 10 17 3 Z',
+          fill: '#4A56C9'
+        })
+      );
+      svg.appendChild(
+        svgEl('circle', { cx: '17', cy: '13', r: '5.5', fill: '#FBFAF5', stroke: '#4A56C9', 'stroke-width': '1.4' })
+      );
+      svg.appendChild(svgEl('circle', { cx: '17', cy: '13', r: '2', fill: '#4A56C9' }));
+      return svg;
+    }
+    function makeLlmIcon() {
+      const svg = svgEl('svg', { width: '30', height: '30', viewBox: '0 0 34 34', fill: 'none' });
+      svg.appendChild(svgEl('circle', { cx: '9', cy: '9', r: '3.4', fill: 'none', stroke: '#4A56C9', 'stroke-width': '1.6' }));
+      svg.appendChild(svgEl('circle', { cx: '25', cy: '9', r: '3.4', fill: 'none', stroke: '#4A56C9', 'stroke-width': '1.6' }));
+      svg.appendChild(svgEl('circle', { cx: '17', cy: '25', r: '3.4', fill: '#4A56C9' }));
+      svg.appendChild(
+        svgEl('path', { d: 'M11.5 11 L22 11 M10.5 12 L15.5 22 M23.5 12 L18.5 22', stroke: '#4A56C9', 'stroke-width': '1.4' })
+      );
+      return svg;
+    }
     function btn(text, cls) {
       const b = document.createElement('button');
       b.className = cls || 'vorsum-ctrl-btn';
@@ -3660,17 +4396,62 @@
       return b;
     }
 
+    // Progress dots (top-right, outside the scrolling slide area). The
+    // current slide is counted, so slide 1 shows one filled
+    // (● ○ ○ ○ ○ ○ ○) and each Next fills one more.
+    const ONBOARDING_SCREENS = 7;
+    function renderProgressDots() {
+      dotsEl.replaceChildren();
+      dotsEl.setAttribute('aria-label', `Step ${screen} of ${ONBOARDING_SCREENS}`);
+      for (let i = 1; i <= ONBOARDING_SCREENS; i++) {
+        const dot = document.createElement('span');
+        const filled = i <= screen;
+        dot.textContent = filled ? '\u25cf' : '\u25cb';
+        dot.style.cssText = filled ? '' : 'opacity:0.55';
+        dotsEl.appendChild(dot);
+      }
+    }
+
+    // Desktop mode slides lay their diagram out left-to-right when the window
+    // is wide enough to hold the row; otherwise they stack vertically.
+    function isWideLayout() {
+      return window.innerWidth >= 1100;
+    }
+
+    // Tracks the previous screen so render() can tell a real slide change
+    // (animate) from an in-place state refresh (don't).
+    let lastRenderedScreen = 0;
+
     function render() {
+      const direction = screen === lastRenderedScreen ? 0 : screen > lastRenderedScreen ? 1 : -1;
+      lastRenderedScreen = screen;
+
       // replaceChildren() (a real DOM API), not innerHTML='' - Trusted
       // Types CSP was blocking the innerHTML setter outright on at least
       // one real setup, which is exactly why this modal was rendering
       // completely empty: render() threw right here, before anything
       // below ever got a chance to append.
       body.replaceChildren();
+      renderProgressDots();
+      renderFooter();
+
+      // Each slide's content is built into `body` as before, then moved into
+      // this wrapper at the end - so the slide transition can translate/fade
+      // one element without touching the (fixed-size) modal or the dots.
+      const slide = document.createElement('div');
+      slide.style.cssText = 'width:100%';
+      // Text-heavy slides keep a comfortable reading measure inside the wide
+      // fixed modal; the mode slides use the full width for their diagrams.
+      if (screen !== 2 && screen !== 3) slide.style.cssText += ';max-width:640px;margin:0 auto';
+
       try {
         if (screen === 1) renderScreen1();
         else if (screen === 2) renderScreen2();
         else if (screen === 3) renderScreen3();
+        else if (screen === 4) renderScreen4();
+        else if (screen === 5) renderScreen5();
+        else if (screen === 6) renderScreen6();
+        else if (screen === 7) renderScreen7();
       } catch (e) {
         // A blank modal is the worst possible first impression for someone
         // who doesn't have an API key yet - if anything unexpected throws
@@ -3686,12 +4467,29 @@
         fallbackLinkBtn.addEventListener('click', () => window.open('https://aistudio.google.com/app/apikey', '_blank'));
         body.appendChild(fallbackLinkBtn);
       }
+
+      while (body.firstChild) slide.appendChild(body.firstChild);
+      body.appendChild(slide);
+
+      // Smooth slide/fade on a genuine step change (Web Animations API - the
+      // same engine CSS transitions use, but it needs no pre-injected styles
+      // and no rAF timing dance). Direction follows forward/back navigation.
+      if (direction !== 0 && typeof slide.animate === 'function') {
+        slide.animate(
+          [
+            { transform: `translateX(${direction * 28}px)`, opacity: 0 },
+            { transform: 'translateX(0)', opacity: 1 }
+          ],
+          { duration: 220, easing: 'ease-out' }
+        );
+      }
+
       registerThemedSubtree(backdrop);
     }
 
     // ---- Screen 1: intro ----
     function renderScreen1() {
-      body.appendChild(heading('Welcome to vorsum'));
+      body.appendChild(heading('Welcome to Vorsum'));
 
       const detectLine = document.createElement('div');
       detectLine.className = 'vorsum-label';
@@ -3713,47 +4511,21 @@
       body.appendChild(imgWrap);
 
       body.appendChild(
-        para(
-          "vorsum drops a \u2211 button on videos you don't have time to watch right now. Hover a video, click \u2211, get a few sentences back - enough to decide whether it's worth coming back to, or enough on its own if it isn't."
-        )
+        paraNodes(['Vorsum is a YouTube summarizer that adds a ', makeSumChip(), " button on videos you don't have time to watch right now."])
       );
-      body.appendChild(para('One thing before you start: summarizing needs an API key - a free one takes about a minute to set up on the next screen.'));
+      body.appendChild(para("It's enough to decide whether it's worth coming back to, or enough on its own if it isn't."));
+      body.appendChild(
+        para("Let's get into two ways on how YouTube videos can be summarized, more info, and then set up Vorsum.")
+      );
 
-      const nextRow = document.createElement('div');
-      nextRow.style.cssText = 'display:flex;justify-content:space-between;align-items:center;margin-top:4px';
-
-      // Double-click-to-confirm, same pattern as History's Delete button -
-      // deliberately harder to trigger by accident than a single click,
-      // since this is the one action that leaves setup unfinished.
-      const skipBtn = document.createElement('button');
-      skipBtn.className = 'vorsum-ctrl-btn';
-      skipBtn.textContent = 'Skip for now';
-      skipBtn.style.cssText =
-        'padding:4px 8px;border-width:1px;border-style:solid;border-radius:3px;cursor:pointer;font-size:10px !important';
-      let skipArmed = false;
-      let skipArmTimeout = null;
-      skipBtn.addEventListener('click', () => {
-        if (!skipArmed) {
-          skipArmed = true;
-          skipBtn.textContent = 'Click again to skip';
-          skipArmTimeout = setTimeout(() => {
-            skipArmed = false;
-            skipBtn.textContent = 'Skip for now';
-          }, 3000);
-          return;
-        }
-        clearTimeout(skipArmTimeout);
-        close(); // deliberately does NOT call setOnboarded(true) - reappears until a key exists
-      });
-
-      const nextBtn = btn('Set up API key \u2192');
-      nextBtn.addEventListener('click', () => {
-        screen = 2;
-        render();
-      });
-      nextRow.appendChild(skipBtn);
-      nextRow.appendChild(nextBtn);
-      body.appendChild(nextRow);
+      const themeRow = document.createElement('div');
+      themeRow.style.cssText = 'display:flex;flex-direction:column;align-items:flex-start;gap:6px;margin:2px 0 12px';
+      const themeLabel = document.createElement('div');
+      themeLabel.style.cssText = 'font-size:12px';
+      themeLabel.textContent = 'By the way, light or dark mode?';
+      themeRow.appendChild(themeLabel);
+      themeRow.appendChild(makeThemeToggle());
+      body.appendChild(themeRow);
 
       function vorapisDetected() {
         return !!document.querySelector(CARD_SELECTOR);
@@ -3770,31 +4542,598 @@
       }
     }
 
-    // ---- Screen 2: instant setup ----
-    function renderScreen2() {
-      // Declare references for elements we need to update dynamically
-      let nextToScreen3, hint;
-
-      function updateNextButtonState() {
-        const hasKey = hasAnyApiKeyConfigured();
-        if (nextToScreen3) {
-          nextToScreen3.disabled = !hasKey;
-          nextToScreen3.style.opacity = hasKey ? '1' : '0.5';
-        }
-        if (hint) {
-          hint.style.display = hasKey ? 'none' : 'block';
-        }
+    // ---- Shared visuals for the two mode slides, a compact inline-styled
+    // nod to vorsum-how-it-works.html (no external CSS, no innerHTML - see
+    // the Trusted Types notes above). Fixed illustration colors are
+    // intentional: these are pictures of the concept, not themed UI. ----
+    function makeOctopus(color, width, opacity) {
+      const o = document.createElement('div');
+      const h = Math.round(width * 0.74);
+      o.style.cssText = `position:absolute;width:${width}px;height:${h}px;opacity:${opacity};pointer-events:none`;
+      const head = document.createElement('div');
+      head.style.cssText = `position:absolute;inset:0 0 40% 0;background:${color};border-radius:60% 60% 45% 45%`;
+      o.appendChild(head);
+      const legW = Math.max(2, Math.round(width / 6));
+      const legH = Math.round(width * 0.5);
+      for (let i = 0; i < 4; i++) {
+        const leg = document.createElement('div');
+        leg.style.cssText =
+          `position:absolute;bottom:-2px;left:${Math.round((i + 0.5) * (width / 4) - legW / 2)}px;` +
+          `width:${legW}px;height:${legH}px;background:${color};border-radius:0 0 4px 4px`;
+        o.appendChild(leg);
       }
+      return o;
+    }
 
-      body.appendChild(heading('Instant setup'));
-      body.appendChild(heading('Get fast summaries with a free Gemini key', 'sub'));
+    function makeThumbArt() {
+      const art = document.createElement('div');
+      art.style.cssText =
+        'position:relative;width:150px;height:84px;border-radius:10px;overflow:hidden;flex:0 0 auto;margin:0 auto;' +
+        'background:linear-gradient(180deg,#BFE3D6 0%,#2C6E77 55%,#113A41 100%)';
+      const rock = document.createElement('div');
+      rock.style.cssText =
+        'position:absolute;left:-10%;bottom:-18%;width:70%;height:55%;background:#7C5B45;border-radius:60% 40% 50% 50%/60% 50% 50% 40%;opacity:.9';
+      const rock2 = document.createElement('div');
+      rock2.style.cssText =
+        'position:absolute;right:-14%;bottom:-22%;width:55%;height:45%;background:#6B4E3B;border-radius:50% 50% 40% 60%/50% 60% 40% 50%;opacity:.85';
+      const hiddenO = makeOctopus('#8A6650', 18, 0.75);
+      hiddenO.style.left = '12%';
+      hiddenO.style.bottom = '8%';
+      const ring = document.createElement('div');
+      ring.style.cssText =
+        'position:absolute;left:50%;top:44%;width:46px;height:38px;transform:translate(-50%,-50%);' +
+        'border:2px solid #FF3B30;border-radius:50%;opacity:.85';
+      const mainO = makeOctopus('#E8683A', 36, 1);
+      mainO.style.left = '50%';
+      mainO.style.top = '44%';
+      mainO.style.transform = 'translate(-50%,-50%)';
+      const dur = document.createElement('span');
+      dur.textContent = '8:42';
+      dur.style.cssText =
+        'position:absolute;right:6px;bottom:6px;background:rgba(0,0,0,.78);color:#fff;font-size:9px;font-weight:500;padding:1px 4px;border-radius:3px';
+      art.append(rock, rock2, hiddenO, ring, mainO, dur);
+      return art;
+    }
+
+    // A jellyfish, shaped like makeOctopus() but as a bell + trailing tentacles.
+    function makeJellyfish(color, width, opacity) {
+      const j = document.createElement('div');
+      const h = Math.round(width * 0.6);
+      j.style.cssText = `position:absolute;width:${width}px;height:${Math.round(width * 1.5)}px;opacity:${opacity};pointer-events:none`;
+      const bell = document.createElement('div');
+      bell.style.cssText = `position:absolute;top:0;left:0;width:${width}px;height:${h}px;background:${color};border-radius:50% 50% 42% 42%`;
+      j.appendChild(bell);
+      for (let i = 0; i < 4; i++) {
+        const t = document.createElement('div');
+        t.style.cssText =
+          `position:absolute;top:${h - 2}px;left:${Math.round((i + 0.5) * (width / 4) - 1)}px;` +
+          `width:2px;height:${Math.round(width * 0.7)}px;background:${color};border-radius:0 0 2px 2px;opacity:0.85`;
+        j.appendChild(t);
+      }
+      return j;
+    }
+
+    // Second faux video (a jellyfish), same visual language as makeThumbArt().
+    function makeThumbArtJellyfish() {
+      const art = document.createElement('div');
+      art.style.cssText =
+        'position:relative;width:150px;height:84px;border-radius:10px;overflow:hidden;flex:0 0 auto;margin:0 auto;' +
+        'background:linear-gradient(180deg,#CFE6F5 0%,#2C5E77 55%,#0F2A40 100%)';
+      const rock = document.createElement('div');
+      rock.style.cssText =
+        'position:absolute;left:-12%;bottom:-20%;width:72%;height:52%;background:#3C5A6B;border-radius:60% 40% 50% 50%/60% 50% 50% 40%;opacity:.9';
+      const rock2 = document.createElement('div');
+      rock2.style.cssText =
+        'position:absolute;right:-14%;bottom:-24%;width:58%;height:44%;background:#324C5C;border-radius:50% 50% 40% 60%/50% 60% 40% 50%;opacity:.85';
+      const hiddenJ = makeJellyfish('#6E93A8', 14, 0.7);
+      hiddenJ.style.left = '12%';
+      hiddenJ.style.top = '10%';
+      const mainJ = makeJellyfish('#7FD8E8', 34, 1);
+      mainJ.style.left = '50%';
+      mainJ.style.top = '18%';
+      mainJ.style.transform = 'translateX(-50%)';
+      const dur = document.createElement('span');
+      dur.textContent = '6:15';
+      dur.style.cssText =
+        'position:absolute;right:6px;bottom:6px;background:rgba(0,0,0,.78);color:#fff;font-size:9px;font-weight:500;padding:1px 4px;border-radius:3px';
+      art.append(rock, rock2, hiddenJ, mainJ, dur);
+      return art;
+    }
+
+    function makeUrlBar(withCC) {
+      const bar = document.createElement('div');
+      bar.className = 'vorsum-history-row';
+      bar.style.cssText =
+        'display:inline-flex;align-items:center;gap:6px;font-family:monospace;font-size:10px;' +
+        'padding:5px 9px;border-radius:8px;border-width:1px;border-style:solid;margin-bottom:10px;max-width:100%;overflow:hidden';
+      bar.appendChild(document.createTextNode('https://www.youtube.com/watch?v=dQw4w9WgXcQ'));
+      if (withCC) {
+        const tag = document.createElement('span');
+        tag.textContent = 'CC';
+        tag.style.cssText =
+          'font-family:sans-serif;font-size:9px;font-weight:600;background:#1B2A22;color:#FBFAF5;padding:1px 5px;border-radius:3px;flex-shrink:0';
+        bar.appendChild(tag);
+      }
+      return bar;
+    }
+
+    function makeDownArrow(labelText) {
+      const wrap = document.createElement('div');
+      wrap.style.cssText = 'display:flex;flex-direction:column;align-items:center;gap:2px;margin:6px 0';
+      if (labelText) {
+        const label = document.createElement('span');
+        label.textContent = labelText;
+        label.style.cssText = 'font-size:10px;opacity:0.75';
+        wrap.appendChild(label);
+      }
+      const shaft = document.createElement('div');
+      shaft.style.cssText = 'width:2px;height:14px;background:#9aa39a;position:relative';
+      const head = document.createElement('div');
+      head.style.cssText =
+        'position:absolute;bottom:-1px;left:50%;transform:translateX(-50%);width:0;height:0;' +
+        'border-left:4px solid transparent;border-right:4px solid transparent;border-top:6px solid #9aa39a';
+      shaft.appendChild(head);
+      wrap.appendChild(shaft);
+      return wrap;
+    }
+
+    function makeRightArrow(labelText) {
+      const wrap = document.createElement('div');
+      wrap.style.cssText = 'display:flex;flex-direction:column;align-items:center;gap:2px;flex:0 0 auto;padding:0 2px';
+      if (labelText) {
+        const label = document.createElement('span');
+        label.textContent = labelText;
+        label.style.cssText = 'font-size:9px;opacity:0.75;white-space:nowrap';
+        wrap.appendChild(label);
+      }
+      const shaft = document.createElement('div');
+      shaft.style.cssText = 'width:30px;height:2px;background:#9aa39a;position:relative';
+      const head = document.createElement('div');
+      head.style.cssText =
+        'position:absolute;right:-1px;top:50%;transform:translateY(-50%);width:0;height:0;' +
+        'border-top:4px solid transparent;border-bottom:4px solid transparent;border-left:6px solid #9aa39a';
+      shaft.appendChild(head);
+      wrap.appendChild(shaft);
+      return wrap;
+    }
+
+    // Faux YouTube card: the illustration plus its title/channel/views, as in
+    // vorsum-how-it-works.html.
+    // cfg (optional): { art, title, channel, initials, views, cached, showButton }
+    // Defaults describe the squid video used on the mode slides.
+    function makeThumbCard(cfg) {
+      cfg = cfg || {};
+      const art = cfg.art || makeThumbArt();
+      const titleText = cfg.title || 'Why This Octopus Just Vanished (Slow\u2011Mo)';
+      const channelName = cfg.channel || 'Tide Line';
+      const initials = cfg.initials || 'TL';
+      const viewsText = cfg.views || '1.4M views \u2022 3 days ago';
+      // Off-white card in light mode, black in dark mode - so the faux player
+      // reads as "off-white" rather than a hard black slab in light theme.
+      const dark = getTheme() === 'dark';
+      const bg = dark ? '#000000' : '#F3F3F3';
+      const titleColor = dark ? '#f0f0f0' : '#1B2A22';
+      const metaColor = dark ? '#b9b9b9' : '#55655A';
+      const wrap = document.createElement('div');
+      wrap.style.cssText =
+        `flex:0 0 auto;width:166px;background:${bg};border-radius:12px;padding:8px;box-shadow:0 4px 14px rgba(0,0,0,0.35)`;
+      wrap.appendChild(art);
+      const meta = document.createElement('div');
+      meta.style.cssText = 'padding-top:7px;text-align:left';
+      const title = document.createElement('p');
+      title.textContent = titleText;
+      title.style.cssText = `font-size:10px;font-weight:600;line-height:1.3;margin:0 0 4px;color:${titleColor}`;
+      const channel = document.createElement('div');
+      channel.style.cssText = 'display:flex;align-items:center;gap:5px';
+      const avatar = document.createElement('span');
+      avatar.textContent = initials;
+      avatar.style.cssText =
+        'width:16px;height:16px;border-radius:50%;background:#4A56C9;color:#fff;font-size:7px;font-weight:600;display:flex;align-items:center;justify-content:center;flex:0 0 auto';
+      const ctext = document.createElement('span');
+      ctext.style.cssText = `font-size:9px;line-height:1.3;color:${metaColor}`;
+      const strong = document.createElement('strong');
+      strong.textContent = channelName;
+      strong.style.cssText = `display:block;font-weight:500;font-size:9.5px;color:${titleColor}`;
+      ctext.appendChild(strong);
+      ctext.appendChild(document.createTextNode(viewsText));
+      channel.appendChild(avatar);
+      channel.appendChild(ctext);
+      meta.appendChild(title);
+      meta.appendChild(channel);
+      wrap.appendChild(meta);
+      if (cfg.showButton) {
+        const btnRow = document.createElement('div');
+        btnRow.style.cssText = 'position:relative;display:flex;justify-content:center;margin-top:7px';
+        btnRow.appendChild(makeSumChip(!!cfg.cached));
+        if (cfg.cursor) btnRow.appendChild(makeCursor());
+        wrap.appendChild(btnRow);
+      }
+      return wrap;
+    }
+
+    // Small faux mouse-pointer, used to "point at" a button in a mockup.
+    function makeCursor() {
+      const wrap = document.createElement('div');
+      wrap.setAttribute('aria-hidden', 'true');
+      wrap.style.cssText =
+        'position:absolute;left:50%;margin-left:6px;bottom:-6px;pointer-events:none;filter:drop-shadow(0 1px 1px rgba(0,0,0,0.45))';
+      const svg = svgEl('svg', { width: '16', height: '20', viewBox: '0 0 18 22' });
+      svg.appendChild(
+        svgEl('path', {
+          d: 'M2 1 L2 17 L6 13 L9 20 L12 18.5 L9 12 L15 12 Z',
+          fill: '#1B2A22',
+          stroke: '#FBFAF5',
+          'stroke-width': '1.2',
+          'stroke-linejoin': 'round'
+        })
+      );
+      wrap.appendChild(svg);
+      return wrap;
+    }
+
+    // widthPx: fixed width for the horizontal desktop row; omit/0 for the
+    // responsive full-width stacked layout. icon: optional factory for an
+    // icon shown above the label (see makeGeminiIcon/makeLlmIcon).
+    function makeNodeBox(labelText, subText, accent, widthPx, icon) {
+      const node = document.createElement('div');
+      node.className = 'vorsum-history-row';
+      node.style.cssText = widthPx
+        ? `border-width:1px;border-style:solid;border-radius:12px;padding:10px 12px;width:${widthPx}px;flex:0 0 auto;text-align:center`
+        : 'border-width:1px;border-style:solid;border-radius:12px;padding:10px 12px;max-width:300px;margin:0 auto;width:100%;text-align:center';
+      if (icon) {
+        const iconWrap = document.createElement('div');
+        iconWrap.style.cssText = 'display:flex;justify-content:center;margin-bottom:6px';
+        iconWrap.appendChild(icon());
+        node.appendChild(iconWrap);
+      }
+      const label = document.createElement('div');
+      label.textContent = labelText;
+      label.style.cssText = `font-size:12px;font-weight:600${accent ? `;color:${accent}` : ''}`;
+      node.appendChild(label);
+      if (subText) {
+        const sub = document.createElement('div');
+        sub.textContent = subText;
+        sub.style.cssText = 'font-size:10px;opacity:0.75;margin-top:2px;line-height:1.4';
+        node.appendChild(sub);
+      }
+      return node;
+    }
+
+    function makeSummaryBox(children, widthPx) {
+      const box = document.createElement('div');
+      box.className = 'vorsum-history-row';
+      box.style.cssText = widthPx
+        ? `border-width:1px;border-style:solid;border-radius:12px;padding:10px 12px;width:${widthPx}px;flex:0 0 auto;box-shadow:0 2px 8px rgba(0,0,0,0.18)`
+        : 'border-width:1px;border-style:solid;border-radius:12px;padding:10px 12px;max-width:340px;margin:0 auto;width:100%;box-shadow:0 2px 8px rgba(0,0,0,0.18)';
+      const label = document.createElement('div');
+      label.textContent = 'Summary';
+      label.style.cssText = 'font-size:10px;font-weight:600;opacity:0.7;margin-bottom:5px';
+      box.appendChild(label);
+      children.forEach((c) => box.appendChild(c));
+      return box;
+    }
+
+    function makeBadge(text, kind) {
+      const badge = document.createElement('span');
+      badge.textContent = text;
+      const styles = {
+        accurate: 'background:#DCEBE1;color:#2E6B50',
+        fast: 'background:#E4E5F7;color:#4A56C9'
+      };
+      badge.style.cssText =
+        `display:inline-block;font-size:10px;font-weight:600;padding:3px 9px;border-radius:100px;margin-bottom:8px;${styles[kind] || ''}`;
+      return badge;
+    }
+
+    // Fixed footer: the same button positions on every slide (Back bottom-left,
+    // primary action bottom-right). Rebuilt per render so it always reflects
+    // the current step, but it lives outside the scrolling slide content.
+    function footerRow() {
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex;justify-content:space-between;align-items:center;gap:8px';
+      return row;
+    }
+    function renderFooter() {
+      footerEl.replaceChildren();
+      if (screen === 1) {
+        const row = footerRow();
+        // Double-click-to-confirm, same pattern as History's Delete button -
+        // deliberately harder to trigger by accident than a single click,
+        // since this is the one action that leaves setup unfinished.
+        const skipBtn = document.createElement('button');
+        skipBtn.className = 'vorsum-ctrl-btn';
+        skipBtn.textContent = 'Skip for now';
+        skipBtn.style.cssText =
+          'padding:4px 8px;border-width:1px;border-style:solid;border-radius:3px;cursor:pointer;font-size:10px !important';
+        let skipArmed = false;
+        let skipArmTimeout = null;
+        skipBtn.addEventListener('click', () => {
+          if (!skipArmed) {
+            skipArmed = true;
+            skipBtn.textContent = 'Click again to skip';
+            skipArmTimeout = setTimeout(() => {
+              skipArmed = false;
+              skipBtn.textContent = 'Skip for now';
+            }, 3000);
+            return;
+          }
+          clearTimeout(skipArmTimeout);
+          close(); // deliberately does NOT call setOnboarded(true) - reappears until a key exists
+        });
+        const nextBtn = btn('Next \u2192');
+        nextBtn.addEventListener('click', () => {
+          screen = 2;
+          render();
+        });
+        row.appendChild(skipBtn);
+        row.appendChild(nextBtn);
+        footerEl.appendChild(row);
+      } else if (screen >= 2 && screen <= 5) {
+        const row = footerRow();
+        const back = btn('\u2190 Back');
+        back.addEventListener('click', () => {
+          screen -= 1;
+          render();
+        });
+        const next = btn('Next \u2192');
+        next.addEventListener('click', () => {
+          screen += 1;
+          render();
+        });
+        row.appendChild(back);
+        row.appendChild(next);
+        footerEl.appendChild(row);
+      } else if (screen === 6) {
+        const row = footerRow();
+        const back = btn('\u2190 Back');
+        back.addEventListener('click', () => {
+          screen = 5;
+          render();
+        });
+        // Reaching the final screen (7) requires a real key.
+        const next = btn('\u2192 How to use Vorsum');
+        const hasKey = hasAnyApiKeyConfigured();
+        next.disabled = !hasKey;
+        next.style.opacity = hasKey ? '1' : '0.5';
+        next.addEventListener('click', () => {
+          if (!hasAnyApiKeyConfigured()) return;
+          screen = 7;
+          render();
+        });
+        row.appendChild(back);
+        row.appendChild(next);
+        footerEl.appendChild(row);
+
+        const hint = document.createElement('div');
+        hint.className = 'vorsum-label';
+        hint.style.cssText = 'font-size:10px !important;text-align:right;margin-top:4px';
+        hint.textContent = 'Save a key above first (Gemini, or Advanced \u2192 Test & Save)';
+        hint.style.display = hasKey ? 'none' : 'block';
+        footerEl.appendChild(hint);
+      } else if (screen === 7) {
+        const row = footerRow();
+        const back = btn('\u2190 Back');
+        back.addEventListener('click', () => {
+          screen = 6;
+          render();
+        });
+        const done = btn("Done, let's go!");
+        done.addEventListener('click', close); // close() marks onboarded when screen === 7
+        row.appendChild(back);
+        row.appendChild(done);
+        footerEl.appendChild(row);
+      }
+      registerThemedSubtree(footerEl);
+    }
+
+    // ---- Screen 2: URL / Gemini vision mode ----
+    function renderScreen2() {
+      body.appendChild(heading('Summary Mode 1: URL'));
+      body.appendChild(makeBadge('More accurate \u2014 sees & hears', 'accurate'));
+      body.appendChild(
+        para(
+          'Vorsum has two modes. The first sends the video link to Google Gemini, which watches every frame and hears the audio, then writes the summary. This is generally slower than Caption mode.'
+        )
+      );
+
+      body.appendChild(makeUrlBar(false));
+
+      const wide = isWideLayout();
+      const flow = document.createElement('div');
+      flow.style.cssText = wide
+        ? 'display:flex;flex-direction:row;flex-wrap:nowrap;align-items:center;justify-content:center;gap:4px;margin:6px 0'
+        : 'display:flex;flex-direction:column;align-items:center;margin:6px 0';
+
+      const s1 = document.createElement('span');
+      s1.textContent =
+        'An octopus off Sulawesi camouflages in under a second, shifting color and skin texture to vanish into the coral. ';
+      s1.style.cssText = 'font-size:12px;line-height:1.5';
+      const dark = getTheme() === 'dark';
+      const flag = document.createElement('span');
+      flag.textContent = 'A second, smaller octopus is also hiding nearby';
+      flag.style.cssText = dark
+        ? 'background:#16301f;color:#5fae82;border-radius:6px;padding:0 4px'
+        : 'background:#DCEBE1;color:#2E6B50;border-radius:6px;padding:0 4px';
+      const s2 = document.createElement('span');
+      s2.textContent =
+        ', mimicking the same rock in the corner of the frame \u2014 visible on screen, though never mentioned out loud.';
+      s2.style.cssText = 'font-size:12px;line-height:1.5';
+
+      const geminiNode = makeNodeBox(
+        'Google Gemini',
+        'watches every frame & hears the audio',
+        '#4A56C9',
+        wide ? 150 : 0,
+        makeGeminiIcon
+      );
+      const summaryBox = makeSummaryBox([s1, flag, s2], wide ? 300 : 0);
+      if (wide) {
+        flow.append(makeThumbCard(), makeRightArrow('Watch video'), geminiNode, makeRightArrow('Summarize'), summaryBox);
+      } else {
+        flow.append(makeThumbCard(), makeDownArrow('Watch video'), geminiNode, makeDownArrow('Summarize'), summaryBox);
+      }
+      body.appendChild(flow);
+    }
+
+    // ---- Screen 3: Captions / transcript mode ----
+    function renderScreen3() {
+      body.appendChild(heading('Summary Mode 2: Caption'));
+      body.appendChild(makeBadge('Faster \u2014 text only', 'fast'));
+      body.appendChild(
+        para(
+          "In the second mode, Vorsum asks YouTube for the video's transcript, then sends that text (and your prompt) to an LLM to summarize. This is generally faster than URL mode."
+        )
+      );
+
+      body.appendChild(makeUrlBar(true));
+
+      const wide = isWideLayout();
+      const flow = document.createElement('div');
+      flow.style.cssText = wide
+        ? 'display:flex;flex-direction:row;flex-wrap:nowrap;align-items:center;justify-content:center;gap:4px;margin:6px 0'
+        : 'display:flex;flex-direction:column;align-items:center;margin:6px 0';
+
+      const tBox = document.createElement('div');
+      tBox.className = 'vorsum-history-row';
+      tBox.style.cssText = wide
+        ? 'border-width:1px;border-style:solid;border-radius:12px;padding:10px 12px;width:230px;flex:0 0 auto;box-shadow:0 2px 8px rgba(0,0,0,0.18)'
+        : 'border-width:1px;border-style:solid;border-radius:12px;padding:10px 12px;max-width:340px;margin:0 auto;width:100%;box-shadow:0 2px 8px rgba(0,0,0,0.18)';
+      const tHead = document.createElement('div');
+      tHead.textContent = 'Transcript (CC)';
+      tHead.style.cssText = 'font-size:10px;font-weight:600;opacity:0.7;margin-bottom:5px';
+      tBox.appendChild(tHead);
+      [
+        '00:04  Off the coast of Sulawesi, this reef looks perfectly still.',
+        '00:41  In under a second, this octopus rewrites its own skin.',
+        '04:33  Texture changes too \u2014 smooth skin turns to coral-like ridges.',
+        '08:20  And just like that, the reef looks empty again.'
+      ].forEach((line) => {
+        const row = document.createElement('div');
+        row.textContent = line;
+        row.style.cssText = 'font-family:monospace;font-size:9px;line-height:1.6;opacity:0.85';
+        tBox.appendChild(row);
+      });
+
+      const s1 = document.createElement('span');
+      s1.textContent =
+        'An octopus off Sulawesi camouflages in under a second, shifting color and skin texture to vanish into the coral.';
+      s1.style.cssText = 'font-size:12px;line-height:1.5';
+      const missWrap = document.createElement('div');
+      missWrap.style.cssText = 'margin-top:8px;padding-top:8px;border-top:1px dashed #9aa39a';
+      const miss = document.createElement('span');
+      miss.textContent = 'A second octopus is also hiding nearby.';
+      miss.style.cssText = 'text-decoration:line-through;opacity:0.5;font-size:11px';
+      const missTag = document.createElement('span');
+      missTag.textContent = 'not in the transcript';
+      missTag.style.cssText =
+        getTheme() === 'dark'
+          ? 'display:inline-block;margin-left:6px;font-size:9px;font-weight:600;color:#c9596e;background:#2c161b;border-radius:5px;padding:0 5px'
+          : 'display:inline-block;margin-left:6px;font-size:9px;font-weight:600;color:#C63C58;background:#F6E1E5;border-radius:5px;padding:0 5px';
+      missWrap.append(miss, document.createElement('br'), missTag);
+
+      const llmNode = makeNodeBox('LLM', 'reads only the words that were spoken', '#4A56C9', wide ? 110 : 0, makeLlmIcon);
+      const summaryBox = makeSummaryBox([s1, missWrap], wide ? 240 : 0);
+      if (wide) {
+        flow.append(makeThumbCard(), makeRightArrow('Get transcript'), tBox, makeRightArrow('Read transcript'), llmNode, makeRightArrow('Summarize'), summaryBox);
+      } else {
+        flow.append(makeThumbCard(), makeDownArrow('Get transcript'), tBox, makeDownArrow('Read transcript'), llmNode, makeDownArrow('Summarize'), summaryBox);
+      }
+      body.appendChild(flow);
+    }
+
+    // ---- Screen 4: recap of the two methods ----
+    function renderScreen4() {
+      body.appendChild(heading('Same video, two approaches'));
+      body.appendChild(para('Putting that together, we can summarize the same video two different ways:'));
+
+      const ul = document.createElement('ul');
+      ul.style.cssText = 'margin:0 0 12px;padding-left:20px';
+      function bullet(text, lead) {
+        const li = document.createElement('li');
+        li.style.cssText = 'margin-bottom:8px;font-size:13px;line-height:1.5';
+        if (lead) {
+          const strong = document.createElement('strong');
+          strong.textContent = lead;
+          li.appendChild(strong);
+          li.appendChild(document.createTextNode(' ' + text));
+        } else {
+          li.textContent = text;
+        }
+        return li;
+      }
+      ul.appendChild(
+        bullet(
+          'Watching (Gemini) takes in sight and sound together, so Vorsum can catch things that are on screen but never said out loud, like a second octopus camouflaged in the corner of the frame. This also enables summaries of music videos and art videos, or videos without captions or transcripts enabled.',
+          'URL mode:'
+        )
+      );
+      ul.appendChild(
+        bullet(
+          "Reading captions is quicker, but it only knows what was spoken, so if captions are unavailable, it won't work.",
+          'Caption mode:'
+        )
+      );
+      body.appendChild(ul);
+
+      const preferLabel = document.createElement('div');
+      preferLabel.style.cssText = 'text-align:center;font-size:13px;font-weight:600;margin:10px 0 6px';
+      preferLabel.textContent = 'Which do you prefer to use?';
+      body.appendChild(preferLabel);
+
+      const selector = makeModeSelector();
+      selector.style.marginBottom = '6px';
+      body.appendChild(selector);
+
+      const changedLine = document.createElement('div');
+      changedLine.style.cssText = 'text-align:center;font-size:11px;opacity:0.8';
+      changedLine.textContent = 'This can be changed any time later in Options.';
+      body.appendChild(changedLine);
+    }
+
+    // ---- Screen 5: privacy / how the APIs are used ----
+    function renderScreen5() {
+      body.appendChild(heading('Privacy & your data'));
+      body.appendChild(
+        para(
+          "Vorsum talks to two services on your behalf: YouTube, to fetch a video's captions/transcript, and an LLM, to write the summary. In the case of Gemini, Google Gemini and YouTube are both owned by Google and it's an internal process."
+        )
+      );
+      body.appendChild(
+        para(
+          'Caption mode sends the transcript text and your prompt to the LLM you chose. URL mode sends the video link to Gemini, which processes the video itself.'
+        )
+      );
+      body.appendChild(
+        paraNodes([
+          "Vorsum does not collect any of your data. Your API key stays in your browser's userscript storage, and nothing is sent anywhere until you actually click ",
+          makeSumChip(),
+          ' to summarize.'
+        ])
+      );
+      body.appendChild(
+        para(
+          'If you would rather not send transcripts to Gemini, you can point Caption mode at a different endpoint or a fully local LLM (Ollama, LM Studio) in Options. This is considered an advanced feature, but is an option!'
+        )
+      );
+    }
+
+    // ---- Screen 6: instant setup ----
+    function renderScreen6() {
+      body.appendChild(heading('API Setup'));
+      body.appendChild(heading('You can get started with a free Gemini key below!', 'sub'));
 
       const steps = document.createElement('ol');
       steps.style.cssText = 'margin:0 0 12px;padding-left:18px';
-      const step1 = document.createElement('li');
-      step1.style.cssText = 'margin-bottom:4px';
-      step1.textContent = 'Open the link below, click "Create API key," then paste it into the box here.';
-      steps.appendChild(step1);
+      [
+        ['Open the link below.'],
+        ['Click ', makeGoogleButtonMock(), ' in top right.'],
+        ['Paste it into the box below.']
+      ].forEach((parts) => {
+        const li = document.createElement('li');
+        li.style.cssText = 'margin-bottom:4px';
+        parts.forEach((p) => li.appendChild(typeof p === 'string' ? document.createTextNode(p) : p));
+        steps.appendChild(li);
+      });
       body.appendChild(steps);
 
       const recommendedLine = document.createElement('div');
@@ -3804,9 +5143,13 @@
 
       const linkBtn = document.createElement('button');
       linkBtn.className = 'vorsum-ctrl-btn';
-      linkBtn.textContent = '\ud83d\udd11 Get free Gemini key';
+      linkBtn.textContent = '\ud83d\udd11 Click to visit Google API page for generating & copying Gemini API key';
       linkBtn.style.cssText =
         'padding:6px 10px;border-width:1px;border-style:solid;border-radius:4px;cursor:pointer;font-size:11px !important;width:100%;margin-bottom:6px';
+      // Active accent color so it reads as this screen's primary action.
+      linkBtn.style.setProperty('background', '#1a73e8', 'important');
+      linkBtn.style.setProperty('color', '#ffffff', 'important');
+      linkBtn.style.setProperty('border-color', '#1a73e8', 'important');
       linkBtn.addEventListener('click', () => window.open('https://aistudio.google.com/app/apikey', '_blank'));
       body.appendChild(linkBtn);
 
@@ -3862,8 +5205,8 @@
             const ok = !!result.text;
             keyStatus.textContent = ok ? '\u2713 Saved and working.' : `Saved, but the test call failed: ${result.error || `HTTP ${res.status}`}`;
             log(ok ? 'Onboarding: Gemini key saved and verified' : 'Onboarding: Gemini key saved, test call failed', ok ? 'info' : 'warn');
-            // Update the "\u2192 How to use Vorsum" button state after key validation
-            updateNextButtonState();
+            // Refresh the gated "How to use Vorsum" footer button after key validation
+            renderFooter();
           },
           ontimeout: () => {
             saveBtn.disabled = false;
@@ -3879,6 +5222,12 @@
       });
 
       // -- advanced / custom provider --
+      const advancedHeader = document.createElement('div');
+      advancedHeader.className = 'vorsum-label';
+      advancedHeader.style.cssText = 'font-size:11px !important;margin-bottom:4px';
+      advancedHeader.textContent = '\u25cf Advanced: Custom API key';
+      body.appendChild(advancedHeader);
+
       const advancedToggle = document.createElement('button');
       advancedToggle.className = 'vorsum-ctrl-btn';
       advancedToggle.style.cssText =
@@ -3944,118 +5293,59 @@
       // -- technical details (nested popup) --
       const techBtn = document.createElement('button');
       techBtn.className = 'vorsum-ctrl-btn';
-      techBtn.textContent = "\ud83e\udd13 I want to know the technical details!";
+      techBtn.textContent = 'More info about APIs';
       techBtn.style.cssText =
         'margin-top:12px;padding:5px 8px;border-width:1px;border-style:solid;border-radius:3px;cursor:pointer;font-size:11px !important;width:100%;text-align:center';
       techBtn.addEventListener('click', showTechDetails);
       body.appendChild(techBtn);
-
-      const backRow = document.createElement('div');
-      backRow.style.cssText = 'display:flex;flex-direction:column;gap:4px;margin-top:14px';
-      const backAndNextRow = document.createElement('div');
-      backAndNextRow.style.cssText = 'display:flex;justify-content:space-between;align-items:center';
-      const backToIntro = document.createElement('button');
-      backToIntro.className = 'vorsum-ctrl-btn';
-      backToIntro.textContent = '\u2190 Back';
-      backToIntro.style.cssText = 'padding:6px 14px;border-width:1px;border-style:solid;border-radius:4px;cursor:pointer;font-size:12px !important';
-      backToIntro.addEventListener('click', () => {
-        screen = 1;
-        render();
-      });
-      // Reaching screen 3 requires a real key - that's what makes it the
-      // actual finish condition (see close()) instead of this screen.
-      nextToScreen3 = btn('\u2192 How to use Vorsum');
-      nextToScreen3.addEventListener('click', () => {
-        if (!hasAnyApiKeyConfigured()) return;
-        screen = 3;
-        render();
-      });
-      backAndNextRow.appendChild(backToIntro);
-      backAndNextRow.appendChild(nextToScreen3);
-      backRow.appendChild(backAndNextRow);
-
-      // Always create hint element, control visibility via updateNextButtonState()
-      hint = document.createElement('div');
-      hint.className = 'vorsum-label';
-      hint.style.cssText = 'font-size:10px !important;text-align:right';
-      hint.textContent = 'Save a key above first (Gemini, or Advanced \u2192 Test & Save)';
-      backRow.appendChild(hint);
-
-      body.appendChild(backRow);
-
-      // Initialize button state based on current key availability
-      updateNextButtonState();
     }
 
-    // ---- Screen 3: how to use vorsum ----
-    function renderScreen3() {
-      body.appendChild(heading('How to use vorsum'));
+    // ---- Screen 7: how to use vorsum ----
+    function renderScreen7() {
+      body.appendChild(heading('Recap and how to use Vorsum'));
 
-      const demoWrap = document.createElement('div');
-      demoWrap.style.cssText = 'display:flex;align-items:center;gap:10px;margin-bottom:6px';
-      const demoBtn = document.createElement('div'); // illustrative only, not a real button
-      demoBtn.className = 'vorsum-btn';
-      demoBtn.textContent = '\u2211';
-      demoBtn.setAttribute('aria-hidden', 'true');
-      demoBtn.style.cssText =
-        'display:inline-flex;align-items:center;justify-content:center;width:28px;height:24px;border-width:1px;border-style:solid;border-radius:3px;font-size:14px !important;flex-shrink:0';
-      const demoText = document.createElement('div');
-      demoText.style.cssText = 'font-size:12px';
-      demoText.textContent = 'This appears when you hover near a video card or its title. Click it to get a summary.';
-      demoWrap.appendChild(demoBtn);
-      demoWrap.appendChild(demoText);
-      body.appendChild(demoWrap);
-      registerThemedEl(demoBtn); // themed like a real button, even though it's just a mockup here
-
-      body.appendChild(para('\u2211 can work one of two ways:'));
-
-      const modesBox = document.createElement('div');
-      modesBox.className = 'vorsum-history-row'; // reuse for a subtle bordered box, already themed
-      modesBox.style.cssText = 'border-width:1px;border-style:solid;border-radius:4px;padding:8px;margin-bottom:12px;font-size:11px;line-height:1.5';
-      const urlLine = document.createElement('div');
-      urlLine.textContent = 'URL \u2014 slower, but works for every video';
-      urlLine.style.cssText = 'margin-bottom:4px';
-      const capLine = document.createElement('div');
-      capLine.textContent = "Caption \u2014 faster, but doesn't work for music or when captions are disabled";
-      modesBox.appendChild(urlLine);
-      modesBox.appendChild(capLine);
-      body.appendChild(modesBox);
-
-      const optionsPara = document.createElement('p');
-      optionsPara.style.cssText = 'margin:0 0 12px';
-      optionsPara.appendChild(document.createTextNode('In Options: switch light/dark theme ('));
-      optionsPara.appendChild(document.createTextNode('\u2600/\u263e'));
-      optionsPara.appendChild(document.createTextNode(' at the top), replay this intro any time ('));
-      const qMark = document.createElement('span');
-      qMark.textContent = '?';
-      optionsPara.appendChild(qMark);
-      optionsPara.appendChild(
-        document.createTextNode(
-          '), resize summary text, or set \u2211 to skip the LLM entirely and just download the transcript.'
-        )
+      // Two faux videos side by side: a new one, and the squid which already
+      // has a saved summary (hence its blue-tinted ∑).
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex;flex-wrap:wrap;justify-content:center;gap:14px;margin:22px 0 8px';
+      row.appendChild(
+        makeThumbCard({
+          art: makeThumbArtJellyfish(),
+          title: 'How Jellyfish Glow Without a Brain',
+          channel: 'Deep Current',
+          initials: 'DC',
+          views: '892K views \u2022 1 week ago',
+          showButton: true,
+          cursor: true
+        })
       );
-      body.appendChild(optionsPara);
+      row.appendChild(makeThumbCard({ showButton: true, cached: true }));
+      body.appendChild(row);
 
+      // margin-top nudges this down ~one line below the cards.
+      const hoverLine = para(
+        "Vorsum's summary button appears when you hover near a video card or its title, or can be changed to be always visible."
+      );
+      hoverLine.style.marginTop = '22px';
+      body.appendChild(hoverLine);
+      body.appendChild(para('Videos with previously saved summaries have a blue tint.'));
+
+      // Mini copy of the collapsed floating widget dot.
+      const dotRow = document.createElement('div');
+      dotRow.style.cssText = 'display:flex;align-items:center;gap:10px;margin:10px 0 4px';
+      dotRow.appendChild(makeWidgetDotMock());
+      const dotText = document.createElement('div');
+      dotText.style.cssText = 'font-size:12px';
+      dotText.textContent = 'This is the options menu for Vorsum. You can drag it around!';
+      dotRow.appendChild(dotText);
+      body.appendChild(dotRow);
+
+      body.appendChild(document.createElement('br'));
+      body.appendChild(document.createElement('br'));
       body.appendChild(para('Have fun!'));
-
-      const finishRow = document.createElement('div');
-      finishRow.style.cssText = 'display:flex;justify-content:space-between;margin-top:4px';
-      const backToTwo = document.createElement('button');
-      backToTwo.className = 'vorsum-ctrl-btn';
-      backToTwo.textContent = '\u2190 Back';
-      backToTwo.style.cssText = 'padding:6px 14px;border-width:1px;border-style:solid;border-radius:4px;cursor:pointer;font-size:12px !important';
-      backToTwo.addEventListener('click', () => {
-        screen = 2;
-        render();
-      });
-      const finishBtn = btn("Done, let's go!");
-      finishBtn.addEventListener('click', close); // close() marks onboarded when screen === 3, see below
-      finishRow.appendChild(backToTwo);
-      finishRow.appendChild(finishBtn);
-      body.appendChild(finishRow);
     }
 
-    // ---- Screen 3: technical details (nested popup, stacked above) ----
+    // ---- Screen 6: technical details (nested popup, stacked above) ----
     function showTechDetails() {
       const techBackdrop = document.createElement('div');
       techBackdrop.className = 'vorsum-modal-backdrop';
@@ -4573,6 +5863,10 @@
     const cardTitle = extractVideoTitle(card);
     const channelInfo = extractChannelInfo(card);
 
+    // A fresh user click (no override) starts a clean slate, so a previous
+    // URL-mode-permission fallback can't linger into this attempt.
+    if (!modeOverride && attempt === 1) urlModePermissionRejected = false;
+
     log(`Click: video=${videoId} mode=${mode} attempt=${attempt}`);
 
     if (cached) {
@@ -4622,7 +5916,7 @@
           transcript = await getTranscript(videoId);
         } catch (e) {
           log(`Transcript fetch threw: ${e.message}`, 'error');
-          if (getFallbackToUrlEnabled()) {
+          if (getFallbackToUrlEnabled() && !urlModePermissionRejected) {
             log('Fallback: captions failed, retrying in URL mode', 'info');
             return handleClick(videoId, card, btn, 1, 'url');
           }
@@ -4631,7 +5925,7 @@
         }
         if (!transcript) {
           log('Transcript: none available for this video', 'warn');
-          if (getFallbackToUrlEnabled()) {
+          if (getFallbackToUrlEnabled() && !urlModePermissionRejected) {
             log('Fallback: no captions available, retrying in URL mode', 'info');
             return handleClick(videoId, card, btn, 1, 'url');
           }
@@ -4710,6 +6004,20 @@
 
         if (result.error) {
           log(`API error: HTTP ${res.status} - ${result.error}`, 'error');
+
+          // URL mode sends the video URI as a {type:'video'} input alongside
+          // the text. Some Google accounts/API keys are NOT allowed to use
+          // that video input (403 "caller does not have permission") even
+          // though the same key works fine for text-only requests (which is
+          // why the onboarding/Options "Test" passes). Retrying the exact
+          // same URL-mode request 3x just re-fails in ~0s, so instead fall
+          // back to caption mode for this click - it only sends text, which
+          // the key already proved it accepts.
+          if (mode === 'url' && res.status === 403) {
+            urlModePermissionRejected = true;
+            log('URL mode: API rejected the video input (403 permission) - retrying in caption mode', 'warn');
+            return handleClick(videoId, card, btn, 1, 'transcript');
+          }
 
           // Quota/rate-limit gets its own path, checked BEFORE the general
           // transient-retry logic below: retrying a 429 a few seconds later
