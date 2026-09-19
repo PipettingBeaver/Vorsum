@@ -1,7 +1,8 @@
 // ==UserScript==
 // @name         Vorsum - Youtube Summary Button
 // @namespace    https://github.com/PipettingBeaver/Vorsum
-// @version      1.0.9
+// @icon         https://s.ytimg.com/yts/img/favicon_32-vflWoMFGx.png
+// @version      1.1.0
 // @description  Adds a click-to-summarize button to YouTube grid cards. Two modes: caption-transcript or direct-URL (Gemini watches the video itself). Beginner friendly and includes a tutorial.
 // @match        https://www.youtube.com/*
 // @grant        GM_xmlhttpRequest
@@ -25,7 +26,7 @@
 
 // ---- Cutting a release ----
 // The version number lives in EXACTLY ONE place: the `// @version` line
-// above (currently line 4). Bump only that line.
+// above. Bump only that line.
 //   - getVersion() reads it at runtime from GM_info.script.version, so no
 //     JS constant needs updating.
 //   - @updateURL / @downloadURL / REPO_RAW_URL / REPO_PAGE_URL are all
@@ -48,9 +49,18 @@
   // long-public Android client key (same one yt-dlp and friends use).
   const ANDROID_API_KEY = 'AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w';
   const ANDROID_CLIENT_VERSION = '20.10.38';
+  // Shared base prompt for BOTH modes. Mode-specific instructions (the
+  // caption music/art heuristic, the fallback sentinel) are appended per call
+  // in buildSummaryPrompt(), so URL mode never carries a caption-only clause.
   const SUMMARY_PROMPT =
     'Summarize this video in 3-4 sentences for someone deciding whether to watch it, and give in Standard Technical English. ' +
-    'Focus on the concrete points/conclusions, not vague teasers. Remove any preamble, only reply with summary itself. If caption returns repetitive or nonsensical content, suggest that video may be a music or art video.';
+    'Focus on the concrete points/conclusions, not vague teasers. Remove any preamble, only reply with summary itself.';
+
+  // Emitted by the model in Caption mode when the transcript is unusable, so
+  // the result can be machine-detected (see handleClick) and, when the URL
+  // fall-back is enabled, trigger a retry in URL mode instead of being shown.
+  const CAPTION_UNUSABLE_MARKER = 'CAPTION_UNUSABLE';
+  const CAPTION_UNUSABLE_RE = new RegExp(`\\b${CAPTION_UNUSABLE_MARKER}\\b`, 'i');
 
   // ---- LLM providers (Caption mode only - URL mode is Gemini-exclusive) ----
   // URL mode depends on Gemini's specific ability to ingest a YouTube URL
@@ -211,6 +221,16 @@
     GM_setValue('vorsum_transcript_button', v);
   }
 
+  // Whether the compact ∑ button is shown over embedded players (iframes on
+  // other sites). On by default; the floating widget is never shown in embeds
+  // regardless, so turning this off means embeds get nothing.
+  function getEmbedButtonEnabled() {
+    return GM_getValue('vorsum_embed_button', true);
+  }
+  function setEmbedButtonEnabled(v) {
+    GM_setValue('vorsum_embed_button', v);
+  }
+
   function sanitizeFilename(name) {
     return (name || 'transcript').replace(/[^\w\s-]/g, '').trim().slice(0, 80) || 'transcript';
   }
@@ -241,6 +261,10 @@
   // nothing on the page can out-rank that, and it doesn't depend on a
   // CSS selector correctly winning a specificity fight we can't see.
   function applyBtnHoverVisibility(btn) {
+    // Buttons that manage their own reveal (the embed ∑ button) opt out of the
+    // shared hover-only system - otherwise its pointer-events:none would make
+    // the button unclickable, and its forced opacity would fight the reveal.
+    if (btn.dataset.vorsumOwnVisibility === 'true') return;
     if (!getHoverOnlyEnabled()) {
       btn.style.setProperty('opacity', '1', 'important');
       btn.style.setProperty('pointer-events', 'auto', 'important');
@@ -709,6 +733,32 @@
     return custom || SUMMARY_PROMPT;
   }
 
+  // The full prompt for a given mode. The shared base (or the user's custom
+  // prompt) is always the starting point - the mode clause is appended on top
+  // so custom prompts keep working while still getting Caption-only behavior.
+  // Applied to BOTH modes' behavior, not just the default prompt.
+  function buildSummaryPrompt(mode) {
+    let prompt = getEffectivePrompt();
+    const lang = getSummaryLanguage().trim();
+    if (lang) prompt += ` Respond in ${lang}.`;
+
+    if (mode === 'transcript') {
+      if (getFallbackToUrlEnabled()) {
+        // Fall-back on: ask for a machine-detectable hard error instead of a
+        // soft suggestion, so handleClick can retry in URL mode.
+        prompt +=
+          ` If the transcript is repetitive, nonsensical, or reads like song lyrics rather than speech` +
+          ` (e.g. a music or art video), reply with exactly ${CAPTION_UNUSABLE_MARKER} and nothing else.`;
+      } else {
+        // Fall-back off: the friendly suggestion, as before.
+        prompt += ' If the transcript is repetitive or nonsensical, suggest that the video may be a music or art video.';
+      }
+    }
+    // URL mode adds nothing: Gemini watches the video and has no transcript to
+    // judge, so the caption heuristic doesn't apply.
+    return prompt;
+  }
+
   // Only non-themed rule left: colors are now applied directly per-element
   // via applyThemeToElement() above, not through this stylesheet (see the
   // comment on THEME_CLASS_ORDER for why). This stays because :disabled
@@ -734,6 +784,26 @@
          whole panel, not just that one field. */
       .vorsum-widget-panel, .vorsum-widget-panel *, .vorsum-modal, .vorsum-modal * {
         box-sizing: border-box !important;
+      }
+      /* Floating dot: grow slightly on hover, squash while pressed/clicked.
+         Transform/box-shadow aren't set inline, so these apply cleanly (the
+         shadow needs !important to outrank the dot's inline style). */
+      #vorsum-widget-dot {
+        transition: transform 0.12s ease, box-shadow 0.12s ease;
+      }
+      #vorsum-widget-dot:hover {
+        transform: scale(1.08);
+        box-shadow: 0 3px 10px rgba(0,0,0,0.45) !important;
+      }
+      #vorsum-widget-dot:active {
+        transform: scale(0.94);
+      }
+      /* Embedded-player ∑ button: same grow/squash feedback. */
+      #vorsum-embed-btn:hover {
+        transform: scale(1.12);
+      }
+      #vorsum-embed-btn:active {
+        transform: scale(0.9);
       }
     `;
     document.head.appendChild(style);
@@ -1872,6 +1942,11 @@
     // actually summarized (visible when Caption mode falls back to URL on a
     // watch page, and the recorded title belongs to a sidebar video).
     const isWatchPage = card === document;
+    // NB: the card-only selectors use `isWatchPage ? null : …` rather than
+    // `!isWatchPage && …` - the latter yields the boolean `false` when it
+    // short-circuits, which then leaks into `el` and makes `el.getAttribute`
+    // throw ("el.getAttribute is not a function") on pages where no
+    // watch-title selector matches (e.g. embedded players).
     const el =
       card.querySelector('h1.ytd-watch-metadata yt-formatted-string') || // modern YouTube watch-page title
       card.querySelector('#eow-title') || // classic / Vorapis watch-page title
@@ -1879,13 +1954,13 @@
       card.querySelector('.watch-title') || // classic watch-page title
       card.querySelector('#watch-headline-title h1') || // classic watch-page title
       card.querySelector('a.yt-uix-sessionlink.spf-link[title]') || // Vorapis watch-page title link
-      (!isWatchPage && card.querySelector('#video-title')) ||
-      (!isWatchPage && card.querySelector('.yt-lockup-title a')) ||
-      (!isWatchPage && card.querySelector('.yt-lockup-title')) ||
-      (!isWatchPage && card.querySelector('.lohp-video-link')) || // homepage featured shelf
-      (!isWatchPage && card.querySelector('.title[title]')) || // sidebar (grid) title span
-      (!isWatchPage && card.querySelector('.ytLockupMetadataViewModelHeadingReset')) || // vanilla lockup card
-      (!isWatchPage && card.querySelector('a[href*="watch?v="]'));
+      (isWatchPage ? null : card.querySelector('#video-title')) ||
+      (isWatchPage ? null : card.querySelector('.yt-lockup-title a')) ||
+      (isWatchPage ? null : card.querySelector('.yt-lockup-title')) ||
+      (isWatchPage ? null : card.querySelector('.lohp-video-link')) || // homepage featured shelf
+      (isWatchPage ? null : card.querySelector('.title[title]')) || // sidebar (grid) title span
+      (isWatchPage ? null : card.querySelector('.ytLockupMetadataViewModelHeadingReset')) || // vanilla lockup card
+      (isWatchPage ? null : card.querySelector('a[href*="watch?v="]'));
     let text = (el?.getAttribute('aria-label') || el?.getAttribute('title') || el?.textContent || '').trim();
     // On a watch page where none of the watch-title selectors matched (an
     // unfamiliar skin/DOM), the browser tab title ("Video Title - YouTube")
@@ -2842,6 +2917,228 @@
     handleEl.addEventListener('pointercancel', (e) => end(e, true));
   }
 
+  // Builds the API Configuration form (provider picker + per-provider fields
+  // + Test/Help). Shared by the Options panel and the onboarding's "I know
+  // what I'm doing" step so the two never drift. Returns { el, refresh,
+  // providerSelect }; refresh() re-reads stored keys/provider into the fields.
+  function createApiConfigForm() {
+    const localBtnStyle =
+      'padding:2px 6px;font-size:11px !important;border-width:1px;border-style:solid;border-radius:3px;cursor:pointer;text-align:left';
+
+    const el = document.createElement('div');
+    el.style.cssText = 'display:flex;flex-direction:column;gap:4px';
+
+    const apiKeyLabel = document.createElement('div');
+    apiKeyLabel.className = 'vorsum-label';
+    apiKeyLabel.style.cssText = 'font-size:10px !important';
+    apiKeyLabel.textContent =
+      "Google's Gemini has free API access, and is the only provider that works with URL mode. Other providers or local endpoints are also available.";
+    el.appendChild(apiKeyLabel);
+
+    const llmProviderSelect = document.createElement('select');
+    llmProviderSelect.className = 'vorsum-select';
+    llmProviderSelect.setAttribute('aria-label', 'API provider for Caption mode');
+    llmProviderSelect.style.cssText =
+      'font-size:11px !important;padding:3px 5px;border-width:1px;border-style:solid;border-radius:3px;width:100%';
+    Object.entries(LLM_PROVIDERS).forEach(([key, p]) => {
+      const opt = document.createElement('option');
+      opt.value = key;
+      opt.textContent = p.label;
+      llmProviderSelect.appendChild(opt);
+    });
+    el.appendChild(llmProviderSelect);
+
+    const llmFieldsWrap = document.createElement('div');
+    llmFieldsWrap.style.cssText = 'display:flex;flex-direction:column;gap:4px;margin-top:4px';
+    el.appendChild(llmFieldsWrap);
+
+    const geminiKeyInput = document.createElement('input');
+    geminiKeyInput.type = 'password';
+    geminiKeyInput.className = 'vorsum-search-input';
+    geminiKeyInput.placeholder = 'Gemini API key';
+    geminiKeyInput.style.cssText = 'font-size:11px !important;padding:3px 5px;border-width:1px;border-style:solid;border-radius:3px;width:100%';
+    geminiKeyInput.addEventListener('change', () => {
+      GM_setValue('gemini_api_key', geminiKeyInput.value);
+      if (geminiKeyInput.value) setOnboarded(true);
+      renderNoKeyNotice();
+      log('Gemini API key updated');
+    });
+
+    const anthKeyRow = document.createElement('div');
+    anthKeyRow.style.cssText = 'display:flex;gap:4px';
+    const anthKeyInput = document.createElement('input');
+    anthKeyInput.type = 'password';
+    anthKeyInput.className = 'vorsum-search-input';
+    anthKeyInput.placeholder = 'Anthropic API key';
+    anthKeyInput.style.cssText = 'flex:1;font-size:11px !important;padding:3px 5px;border-width:1px;border-style:solid;border-radius:3px';
+    anthKeyRow.appendChild(anthKeyInput);
+    const anthModelInput = document.createElement('input');
+    anthModelInput.type = 'text';
+    anthModelInput.className = 'vorsum-search-input';
+    anthModelInput.placeholder = LLM_PROVIDERS.anthropic.modelPlaceholder;
+    anthModelInput.style.cssText = 'font-size:11px !important;padding:3px 5px;border-width:1px;border-style:solid;border-radius:3px;margin-top:4px;width:100%';
+
+    const oaiKeyInput = document.createElement('input');
+    oaiKeyInput.type = 'password';
+    oaiKeyInput.className = 'vorsum-search-input';
+    oaiKeyInput.placeholder = 'API key (often optional for local servers)';
+    oaiKeyInput.style.cssText = 'font-size:11px !important;padding:3px 5px;border-width:1px;border-style:solid;border-radius:3px;width:100%';
+    const oaiBaseUrlInput = document.createElement('input');
+    oaiBaseUrlInput.type = 'text';
+    oaiBaseUrlInput.className = 'vorsum-search-input';
+    oaiBaseUrlInput.placeholder = LLM_PROVIDERS.openai_compatible.baseUrlPlaceholder;
+    oaiBaseUrlInput.style.cssText = 'font-size:11px !important;padding:3px 5px;border-width:1px;border-style:solid;border-radius:3px;margin-top:4px;width:100%';
+    const oaiModelInput = document.createElement('input');
+    oaiModelInput.type = 'text';
+    oaiModelInput.className = 'vorsum-search-input';
+    oaiModelInput.placeholder = LLM_PROVIDERS.openai_compatible.modelPlaceholder;
+    oaiModelInput.style.cssText = 'font-size:11px !important;padding:3px 5px;border-width:1px;border-style:solid;border-radius:3px;margin-top:4px;width:100%';
+
+    llmFieldsWrap.appendChild(geminiKeyInput);
+    llmFieldsWrap.appendChild(anthKeyRow);
+    llmFieldsWrap.appendChild(anthModelInput);
+    llmFieldsWrap.appendChild(oaiKeyInput);
+    llmFieldsWrap.appendChild(oaiBaseUrlInput);
+    llmFieldsWrap.appendChild(oaiModelInput);
+
+    const llmTestRow = document.createElement('div');
+    llmTestRow.style.cssText = 'display:flex;gap:4px;margin-top:4px';
+    const llmTestBtn = document.createElement('button');
+    llmTestBtn.className = 'vorsum-ctrl-btn';
+    llmTestBtn.textContent = 'Test';
+    llmTestBtn.style.cssText = localBtnStyle + ';flex:1;text-align:center';
+    const llmHelpBtn = document.createElement('button');
+    llmHelpBtn.className = 'vorsum-ctrl-btn';
+    llmHelpBtn.textContent = 'Help';
+    llmHelpBtn.title = 'New to API keys? Explains how they work and that Gemini has a free tier';
+    llmHelpBtn.style.cssText = localBtnStyle + ';flex:1;text-align:center';
+    llmHelpBtn.addEventListener('click', showApiKeyHelpModal);
+    llmTestRow.appendChild(llmTestBtn);
+    llmTestRow.appendChild(llmHelpBtn);
+    el.appendChild(llmTestRow);
+
+    function refresh() {
+      const provider = getLlmProvider();
+      llmProviderSelect.value = provider;
+      geminiKeyInput.style.display = provider === 'gemini' ? 'block' : 'none';
+      anthKeyRow.style.display = provider === 'anthropic' ? 'flex' : 'none';
+      anthModelInput.style.display = provider === 'anthropic' ? 'block' : 'none';
+      oaiKeyInput.style.display = provider === 'openai_compatible' ? 'block' : 'none';
+      oaiBaseUrlInput.style.display = provider === 'openai_compatible' ? 'block' : 'none';
+      oaiModelInput.style.display = provider === 'openai_compatible' ? 'block' : 'none';
+
+      const creds = getProviderCredentials(provider);
+      if (provider === 'gemini') geminiKeyInput.value = creds.apiKey;
+      if (provider === 'anthropic') anthKeyInput.value = creds.apiKey;
+      if (provider === 'openai_compatible') {
+        oaiKeyInput.value = creds.apiKey;
+        oaiBaseUrlInput.value = creds.baseUrl || '';
+      }
+      if (provider === 'anthropic') anthModelInput.value = creds.model || '';
+      if (provider === 'openai_compatible') oaiModelInput.value = creds.model || '';
+    }
+
+    llmProviderSelect.addEventListener('change', () => {
+      setLlmProvider(llmProviderSelect.value);
+      refresh();
+      log(`Caption mode LLM provider set to: ${llmProviderSelect.value}`);
+    });
+    anthKeyInput.addEventListener('change', () => {
+      GM_setValue('vorsum_anthropic_key', anthKeyInput.value);
+      if (anthKeyInput.value) setOnboarded(true);
+      renderNoKeyNotice();
+      log('Anthropic API key updated');
+    });
+    anthModelInput.addEventListener('change', () => {
+      GM_setValue('vorsum_anthropic_model', anthModelInput.value.trim());
+      log(`Anthropic model set to: ${anthModelInput.value.trim() || '(default)'}`);
+    });
+    oaiKeyInput.addEventListener('change', () => {
+      GM_setValue('vorsum_openai_key', oaiKeyInput.value);
+      if (oaiKeyInput.value) setOnboarded(true);
+      renderNoKeyNotice();
+      log('OpenAI-compatible API key updated');
+    });
+    oaiBaseUrlInput.addEventListener('change', () => {
+      GM_setValue('vorsum_openai_base_url', oaiBaseUrlInput.value.trim());
+      log(`OpenAI-compatible base URL set to: ${oaiBaseUrlInput.value.trim() || '(none)'}`);
+    });
+    oaiModelInput.addEventListener('change', () => {
+      GM_setValue('vorsum_openai_model', oaiModelInput.value.trim());
+      log(`OpenAI-compatible model set to: ${oaiModelInput.value.trim() || '(none)'}`);
+    });
+
+    llmTestBtn.addEventListener('click', () => {
+      const provider = getLlmProvider();
+      const adapter = LLM_PROVIDERS[provider];
+      const creds = getProviderCredentials(provider);
+      if (!creds.apiKey && provider !== 'openai_compatible') {
+        llmTestBtn.textContent = 'No key set';
+        setTimeout(() => (llmTestBtn.textContent = 'Test'), 2000);
+        return;
+      }
+      if (adapter.needsBaseUrl && !creds.baseUrl) {
+        llmTestBtn.textContent = 'No base URL set';
+        setTimeout(() => (llmTestBtn.textContent = 'Test'), 2000);
+        return;
+      }
+      llmTestBtn.textContent = 'Testing…';
+      llmTestBtn.disabled = true;
+      log(`Testing ${adapter.label}...`);
+      const { url, headers, body } = adapter.buildRequest({
+        apiKey: creds.apiKey,
+        baseUrl: creds.baseUrl,
+        model: creds.model,
+        promptText: 'Reply with only the word: OK'
+      });
+      GM_xmlhttpRequest({
+        method: 'POST',
+        url,
+        headers,
+        timeout: 15000,
+        data: body,
+        onload: (res) => {
+          llmTestBtn.disabled = false;
+          let data = null;
+          try {
+            data = JSON.parse(res.responseText);
+          } catch (e) {
+            /* handled below */
+          }
+          const result = data ? adapter.parseResponse(data) : { error: `HTTP ${res.status}, invalid JSON` };
+          if (result.text) {
+            llmTestBtn.textContent = '✓ Works';
+            llmTestBtn.title = '';
+            log(`${adapter.label} test succeeded`);
+          } else {
+            llmTestBtn.textContent = '✗ Failed';
+            llmTestBtn.title = result.error || `HTTP ${res.status}`;
+            log(`${adapter.label} test failed: ${result.error || res.status}`, 'warn');
+          }
+          setTimeout(() => {
+            llmTestBtn.textContent = 'Test';
+            llmTestBtn.title = '';
+          }, 4000);
+        },
+        ontimeout: () => {
+          llmTestBtn.disabled = false;
+          llmTestBtn.textContent = '✗ Timeout';
+          log(`${adapter.label} test timed out`, 'warn');
+          setTimeout(() => (llmTestBtn.textContent = 'Test'), 4000);
+        },
+        onerror: () => {
+          llmTestBtn.disabled = false;
+          llmTestBtn.textContent = '✗ Error';
+          log(`${adapter.label} test: network error`, 'warn');
+          setTimeout(() => (llmTestBtn.textContent = 'Test'), 4000);
+        }
+      });
+    });
+
+    refresh();
+    return { el, refresh, providerSelect: llmProviderSelect };
+  }
+
   function buildWidget() {
     const dot = document.createElement('div');
     dot.id = 'vorsum-widget-dot';
@@ -2892,8 +3189,11 @@
       'flex-direction:column',
       'gap:4px',
       'width:400px',
-      'max-height:80vh',
-      'overflow-y:auto'
+      'max-height:90vh',
+      // Scroll on the inner Options/History panels (below) instead of the
+      // whole panel, so the title row and bottom drag strip never scroll and
+      // no stray outer scrollbar appears.
+      'overflow:hidden'
     ].join(';');
 
     // A slim "grab" strip at the bottom of the panel so the larger UI can
@@ -2910,8 +3210,9 @@
       'justify-content:center',
       'height:12px',
       'flex-shrink:0',
-      'position:sticky',
-      'bottom:0',
+      // Static (not sticky): as the last flow child it takes its own space and
+      // can never overlay the panel's last row (Load more / Stats & Data) when
+      // the panel scrolls.
       'background:inherit',
       'border-top-width:1px',
       'border-top-style:solid',
@@ -3157,7 +3458,7 @@
 
     // -- history panel --
     const historyPanel = document.createElement('div');
-    historyPanel.style.cssText = 'display:none;flex-direction:column;gap:4px';
+    historyPanel.style.cssText = 'display:none;flex:1;min-height:0;overflow-y:auto;flex-direction:column;gap:4px';
 
     const searchInput = document.createElement('input');
     searchInput.type = 'text';
@@ -3192,7 +3493,7 @@
 
     // -- options panel (accessibility + prompt customization) --
     const optionsPanel = document.createElement('div');
-    optionsPanel.style.cssText = 'display:none;flex-direction:column;gap:6px';
+    optionsPanel.style.cssText = 'display:none;flex:1;min-height:0;overflow-y:auto;flex-direction:column;gap:6px';
 
     // Helper: Create collapsible section
     function createCollapsibleSection(title, initiallyOpen = false) {
@@ -3246,217 +3547,12 @@
       return { section, body, header, setOpen };
     }
 
-    // -- API provider intro --
-    const apiKeyLabel = document.createElement('div');
-    apiKeyLabel.className = 'vorsum-label';
-    apiKeyLabel.style.cssText = 'font-size:10px !important';
-    apiKeyLabel.textContent =
-      "Google's Gemini has free API access, and is the only provider that works with URL mode. Other providers or local endpoints are also available.";
+    // -- API Configuration (shared form; see createApiConfigForm) --
+    const apiForm = createApiConfigForm();
+    const llmProviderSelect = apiForm.providerSelect;
 
-    // Gemini API key input. Lives inline in the provider fields below (shown
-    // only when Gemini is the selected provider) rather than as its own row
-    // up here, so all three providers present the same single text-bar shape.
-    // The shared Test button in llmTestRow covers testing it (Gemini's
-    // adapter is what that button already uses when Gemini is selected).
-    const geminiKeyInput = document.createElement('input');
-    geminiKeyInput.type = 'password';
-    geminiKeyInput.className = 'vorsum-search-input';
-    geminiKeyInput.placeholder = 'Gemini API key';
-    geminiKeyInput.style.cssText = 'font-size:11px !important;padding:3px 5px;border-width:1px;border-style:solid;border-radius:3px;width:100%';
-    geminiKeyInput.value = GM_getValue('gemini_api_key', '');
-    geminiKeyInput.addEventListener('change', () => {
-      GM_setValue('gemini_api_key', geminiKeyInput.value);
-      if (geminiKeyInput.value) setOnboarded(true); // a real key now exists - stop nagging on every load
-      renderNoKeyNotice();
-      log('Gemini API key updated');
-    });
-
-
-    // -- Caption mode LLM provider (URL mode stays Gemini-only, see the
-    // comment on LLM_PROVIDERS for why) --
-    const llmProviderSelect = document.createElement('select');
-    llmProviderSelect.className = 'vorsum-select';
-    llmProviderSelect.setAttribute('aria-label', 'API provider for Caption mode');
-    llmProviderSelect.style.cssText = 'font-size:11px !important;padding:3px 5px;border-width:1px;border-style:solid;border-radius:3px;width:100%';
-    Object.entries(LLM_PROVIDERS).forEach(([key, p]) => {
-      const opt = document.createElement('option');
-      opt.value = key;
-      opt.textContent = p.label;
-      llmProviderSelect.appendChild(opt);
-    });
-
-    const llmFieldsWrap = document.createElement('div');
-    llmFieldsWrap.style.cssText = 'display:flex;flex-direction:column;gap:4px;margin-top:4px';
-
-    const anthKeyRow = document.createElement('div');
-    anthKeyRow.style.cssText = 'display:flex;gap:4px';
-    const anthKeyInput = document.createElement('input');
-    anthKeyInput.type = 'password';
-    anthKeyInput.className = 'vorsum-search-input';
-    anthKeyInput.placeholder = 'Anthropic API key';
-    anthKeyInput.style.cssText = 'flex:1;font-size:11px !important;padding:3px 5px;border-width:1px;border-style:solid;border-radius:3px';
-    const anthModelInput = document.createElement('input');
-    anthModelInput.type = 'text';
-    anthModelInput.className = 'vorsum-search-input';
-    anthModelInput.placeholder = LLM_PROVIDERS.anthropic.modelPlaceholder;
-    anthModelInput.style.cssText = 'font-size:11px !important;padding:3px 5px;border-width:1px;border-style:solid;border-radius:3px;margin-top:4px;width:100%';
-
-    const oaiKeyInput = document.createElement('input');
-    oaiKeyInput.type = 'password';
-    oaiKeyInput.className = 'vorsum-search-input';
-    oaiKeyInput.placeholder = 'API key (often optional for local servers)';
-    oaiKeyInput.style.cssText = 'font-size:11px !important;padding:3px 5px;border-width:1px;border-style:solid;border-radius:3px;width:100%';
-    const oaiBaseUrlInput = document.createElement('input');
-    oaiBaseUrlInput.type = 'text';
-    oaiBaseUrlInput.className = 'vorsum-search-input';
-    oaiBaseUrlInput.placeholder = LLM_PROVIDERS.openai_compatible.baseUrlPlaceholder;
-    oaiBaseUrlInput.style.cssText = 'font-size:11px !important;padding:3px 5px;border-width:1px;border-style:solid;border-radius:3px;margin-top:4px;width:100%';
-    const oaiModelInput = document.createElement('input');
-    oaiModelInput.type = 'text';
-    oaiModelInput.className = 'vorsum-search-input';
-    oaiModelInput.placeholder = LLM_PROVIDERS.openai_compatible.modelPlaceholder;
-    oaiModelInput.style.cssText = 'font-size:11px !important;padding:3px 5px;border-width:1px;border-style:solid;border-radius:3px;margin-top:4px;width:100%';
-
-    anthKeyRow.appendChild(anthKeyInput);
-    llmFieldsWrap.appendChild(geminiKeyInput);
-    llmFieldsWrap.appendChild(anthKeyRow);
-    llmFieldsWrap.appendChild(anthModelInput);
-    llmFieldsWrap.appendChild(oaiKeyInput);
-    llmFieldsWrap.appendChild(oaiBaseUrlInput);
-    llmFieldsWrap.appendChild(oaiModelInput);
-
-    const llmTestRow = document.createElement('div');
-    llmTestRow.style.cssText = 'display:flex;gap:4px;margin-top:4px';
-    const llmTestBtn = document.createElement('button');
-    llmTestBtn.className = 'vorsum-ctrl-btn';
-    llmTestBtn.textContent = 'Test';
-    llmTestBtn.style.cssText = btnStyle + ';flex:1;text-align:center';
-    const llmHelpBtn = document.createElement('button');
-    llmHelpBtn.className = 'vorsum-ctrl-btn';
-    llmHelpBtn.textContent = 'Help';
-    llmHelpBtn.title = 'New to API keys? Explains how they work and that Gemini has a free tier';
-    llmHelpBtn.style.cssText = btnStyle + ';flex:1;text-align:center';
-    llmHelpBtn.addEventListener('click', showApiKeyHelpModal);
-    llmTestRow.appendChild(llmTestBtn);
-    llmTestRow.appendChild(llmHelpBtn);
-
-    function renderLlmFields() {
-      const provider = getLlmProvider();
-      llmProviderSelect.value = provider;
-      geminiKeyInput.style.display = provider === 'gemini' ? 'block' : 'none';
-      anthKeyRow.style.display = provider === 'anthropic' ? 'flex' : 'none';
-      anthModelInput.style.display = provider === 'anthropic' ? 'block' : 'none';
-      oaiKeyInput.style.display = provider === 'openai_compatible' ? 'block' : 'none';
-      oaiBaseUrlInput.style.display = provider === 'openai_compatible' ? 'block' : 'none';
-      oaiModelInput.style.display = provider === 'openai_compatible' ? 'block' : 'none';
-
-      const creds = getProviderCredentials(provider);
-      if (provider === 'gemini') geminiKeyInput.value = creds.apiKey;
-      if (provider === 'anthropic') anthKeyInput.value = creds.apiKey;
-      if (provider === 'openai_compatible') {
-        oaiKeyInput.value = creds.apiKey;
-        oaiBaseUrlInput.value = creds.baseUrl || '';
-      }
-      if (provider === 'anthropic') anthModelInput.value = creds.model || '';
-      if (provider === 'openai_compatible') oaiModelInput.value = creds.model || '';
-    }
-
-    llmProviderSelect.addEventListener('change', () => {
-      setLlmProvider(llmProviderSelect.value);
-      renderLlmFields();
-      log(`Caption mode LLM provider set to: ${llmProviderSelect.value}`);
-    });
-    anthKeyInput.addEventListener('change', () => {
-      GM_setValue('vorsum_anthropic_key', anthKeyInput.value);
-      if (anthKeyInput.value) setOnboarded(true);
-      renderNoKeyNotice();
-      log('Anthropic API key updated');
-    });
-    anthModelInput.addEventListener('change', () => {
-      GM_setValue('vorsum_anthropic_model', anthModelInput.value.trim());
-      log(`Anthropic model set to: ${anthModelInput.value.trim() || '(default)'}`);
-    });
-    oaiKeyInput.addEventListener('change', () => {
-      GM_setValue('vorsum_openai_key', oaiKeyInput.value);
-      if (oaiKeyInput.value) setOnboarded(true);
-      renderNoKeyNotice();
-      log('OpenAI-compatible API key updated');
-    });
-    oaiBaseUrlInput.addEventListener('change', () => {
-      GM_setValue('vorsum_openai_base_url', oaiBaseUrlInput.value.trim());
-      log(`OpenAI-compatible base URL set to: ${oaiBaseUrlInput.value.trim() || '(none)'}`);
-    });
-    oaiModelInput.addEventListener('change', () => {
-      GM_setValue('vorsum_openai_model', oaiModelInput.value.trim());
-      log(`OpenAI-compatible model set to: ${oaiModelInput.value.trim() || '(none)'}`);
-    });
-
-    llmTestBtn.addEventListener('click', () => {
-      const provider = getLlmProvider();
-      const adapter = LLM_PROVIDERS[provider];
-      const creds = getProviderCredentials(provider);
-      if (!creds.apiKey && provider !== 'openai_compatible') {
-        llmTestBtn.textContent = 'No key set';
-        setTimeout(() => (llmTestBtn.textContent = 'Test'), 2000);
-        return;
-      }
-      if (adapter.needsBaseUrl && !creds.baseUrl) {
-        llmTestBtn.textContent = 'No base URL set';
-        setTimeout(() => (llmTestBtn.textContent = 'Test'), 2000);
-        return;
-      }
-      llmTestBtn.textContent = 'Testing…';
-      llmTestBtn.disabled = true;
-      log(`Testing ${adapter.label}...`);
-      const { url, headers, body } = adapter.buildRequest({
-        apiKey: creds.apiKey,
-        baseUrl: creds.baseUrl,
-        model: creds.model,
-        promptText: 'Reply with only the word: OK'
-      });
-      GM_xmlhttpRequest({
-        method: 'POST',
-        url,
-        headers,
-        timeout: 15000,
-        data: body,
-        onload: (res) => {
-          llmTestBtn.disabled = false;
-          let data = null;
-          try {
-            data = JSON.parse(res.responseText);
-          } catch (e) {
-            /* handled below */
-          }
-          const result = data ? adapter.parseResponse(data) : { error: `HTTP ${res.status}, invalid JSON` };
-          if (result.text) {
-            llmTestBtn.textContent = '✓ Works';
-            llmTestBtn.title = '';
-            log(`${adapter.label} test succeeded`);
-          } else {
-            llmTestBtn.textContent = '✗ Failed';
-            llmTestBtn.title = result.error || `HTTP ${res.status}`;
-            log(`${adapter.label} test failed: ${result.error || res.status}`, 'warn');
-          }
-          setTimeout(() => {
-            llmTestBtn.textContent = 'Test';
-            llmTestBtn.title = '';
-          }, 4000);
-        },
-        ontimeout: () => {
-          llmTestBtn.disabled = false;
-          llmTestBtn.textContent = '✗ Timeout';
-          log(`${adapter.label} test timed out`, 'warn');
-          setTimeout(() => (llmTestBtn.textContent = 'Test'), 4000);
-        },
-        onerror: () => {
-          llmTestBtn.disabled = false;
-          llmTestBtn.textContent = '✗ Error';
-          log(`${adapter.label} test: network error`, 'warn');
-          setTimeout(() => (llmTestBtn.textContent = 'Test'), 4000);
-        }
-      });
-    });
+    // (The API Configuration fields/Test now come from createApiConfigForm();
+    // see apiForm above.)
 
     // -- Summary output language (explicit, not buried in prompt text) --
     const langLabel = document.createElement('div');
@@ -3520,6 +3616,22 @@
     hoverOnlyText.textContent = 'Hide buttons until hovering the video';
     hoverOnlyRow.appendChild(hoverOnlyCheckbox);
     hoverOnlyRow.appendChild(hoverOnlyText);
+
+    // -- ∑ button on embedded players --
+    const embedButtonRow = document.createElement('label');
+    embedButtonRow.style.cssText = 'display:flex;align-items:center;gap:6px;margin-top:2px;font-size:11px;cursor:pointer';
+    const embedButtonCheckbox = document.createElement('input');
+    embedButtonCheckbox.type = 'checkbox';
+    embedButtonCheckbox.checked = getEmbedButtonEnabled();
+    embedButtonCheckbox.addEventListener('change', () => {
+      setEmbedButtonEnabled(embedButtonCheckbox.checked);
+      scanForCards(); // add/remove the embed button immediately
+      log(`∑ on embed videos: ${embedButtonCheckbox.checked}`);
+    });
+    const embedButtonText = document.createElement('span');
+    embedButtonText.textContent = '\u2211 appears on embed videos';
+    embedButtonRow.appendChild(embedButtonCheckbox);
+    embedButtonRow.appendChild(embedButtonText);
 
     // "Summary mode" heading (a simple label, not a collapsible subsection)
     // that groups the mode slider and the URL fallback toggle.
@@ -3592,7 +3704,8 @@
     fontExampleText.className = 'vorsum-history-summary vorsum-history-row';
     fontExampleText.textContent = "This is an example summary text you'd read on a page or in the History tab.";
     fontExampleText.style.cssText =
-      'margin-top:6px;line-height:1.3;padding:5px 6px;border-width:1px;border-style:dashed;border-radius:4px';
+      'margin-top:6px;line-height:1.3;padding:5px 6px;border-width:1px;border-style:dashed;border-radius:4px;' +
+      'box-shadow:0 0 0 1px rgba(0,0,0,0.12),0 3px 10px rgba(0,0,0,0.3)';
     registerScalableSummaryEl(fontExampleText);
 
     function renderFontRow() {
@@ -3644,6 +3757,7 @@
     modePanel.appendChild(fallbackUrlRow);
     modePanel.appendChild(transcriptButtonRow);
     modePanel.appendChild(hoverOnlyRow);
+    modePanel.appendChild(embedButtonRow);
 
     textSizePanel.appendChild(fontLabel);
     textSizePanel.appendChild(fontRow);
@@ -3751,10 +3865,7 @@
 
     // 1. API Configuration
     const apiSection = createCollapsibleSection('API Configuration', false);
-    apiSection.body.appendChild(apiKeyLabel);
-    apiSection.body.appendChild(llmProviderSelect);
-    apiSection.body.appendChild(llmFieldsWrap);
-    apiSection.body.appendChild(llmTestRow);
+    apiSection.body.appendChild(apiForm.el);
     optionsPanel.appendChild(apiSection.section);
 
     // 2. Prompt Configuration
@@ -4031,7 +4142,7 @@
       historyPanel.style.display = 'none';
       historyPanelOpen = false;
       refreshCacheSizeLine();
-      renderLlmFields(); // re-read stored keys each open (e.g. a key saved via onboarding since the panel was built)
+      apiForm.refresh(); // re-read stored keys each open (e.g. a key saved via onboarding since the panel was built)
     }
 
     historyBtn.addEventListener('click', () => {
@@ -4113,7 +4224,7 @@
     renderModeBtn();
     renderDebugBtn();
     renderFontRow();
-    renderLlmFields();
+    apiForm.refresh();
 
     document.documentElement.appendChild(panel);
     document.documentElement.appendChild(dot);
@@ -4125,6 +4236,71 @@
     applyWidgetPosition();
 
     if (getWidgetCollapsed()) collapse();
+
+    // ---- Fullscreen handling ----
+    // The floating dot otherwise lingers over a fullscreen video. Hide the
+    // whole widget while fullscreen is active and restore it on exit.
+    //
+    // Diagnosing "which layer" the fullscreen video is on: the real Fullscreen
+    // API reports document.fullscreenElement (that element is promoted to the
+    // browser's top layer). If that's the player/container, anything outside
+    // it is hidden by the browser anyway - UNLESS the fullscreen element is
+    // <html> itself, in which case our dot (a child of <html>) stays visible.
+    // YouTube can also "fullscreen" purely with a CSS class (.ytp-fullscreen)
+    // without the API, which never fires fullscreenchange. Both are covered
+    // here, and the resolved element is written to the debug log.
+    function fullscreenDescription() {
+      const el = document.fullscreenElement || document.webkitFullscreenElement;
+      if (el) {
+        let z = '?';
+        try {
+          z = getComputedStyle(el).zIndex;
+        } catch (e) {
+          /* ignore */
+        }
+        const cls =
+          el.className && typeof el.className === 'string'
+            ? '.' + el.className.trim().split(/\s+/).join('.')
+            : '';
+        return `${el.tagName.toLowerCase()}${el.id ? '#' + el.id : ''}${cls} (z-index ${z})`;
+      }
+      const player = document.querySelector('#movie_player, .html5-video-player');
+      if (player && player.classList.contains('ytp-fullscreen')) {
+        return 'CSS class .ytp-fullscreen (no Fullscreen API element)';
+      }
+      return 'none';
+    }
+    function isFullscreenActive() {
+      if (document.fullscreenElement || document.webkitFullscreenElement) return true;
+      const player = document.querySelector('#movie_player, .html5-video-player');
+      return !!(player && player.classList.contains('ytp-fullscreen'));
+    }
+    let lastFullscreenState = null;
+    function applyFullscreenVisibility() {
+      const fs = isFullscreenActive();
+      if (fs === lastFullscreenState) return;
+      lastFullscreenState = fs;
+      if (fs) {
+        panel.style.display = 'none';
+        dot.style.display = 'none';
+      } else {
+        const collapsed = getWidgetCollapsed();
+        panel.style.display = collapsed ? 'none' : 'flex';
+        dot.style.display = collapsed ? 'flex' : 'none';
+      }
+    }
+    document.addEventListener('fullscreenchange', () => {
+      log(`Fullscreen: ${fullscreenDescription()}`);
+      applyFullscreenVisibility();
+    });
+    document.addEventListener('webkitfullscreenchange', () => {
+      log(`Fullscreen (webkit): ${fullscreenDescription()}`);
+      applyFullscreenVisibility();
+    });
+    // Poll cheaply as well, to catch CSS-class fullscreen (and the player
+    // element appearing a moment after load) that fullscreenchange misses.
+    setInterval(applyFullscreenVisibility, 700);
+    applyFullscreenVisibility();
 
     renderHistoryNotice();
     renderRateLimitNotice();
@@ -4154,7 +4330,10 @@
     // mode diagram, and the tallest text slide), and stay put for the whole
     // session regardless of which slide is showing.
     const modalWidth = Math.min(isWideLayout() ? 1180 : 480, window.innerWidth - 32);
-    const modalHeight = Math.min(Math.round(window.innerHeight * 0.85), 640);
+    // Viewport-derived fixed height (no small hard cap) so the tallest slide
+    // fits without an inner scrollbar while the container stays a fixed size
+    // across slides. 85vh was the original ceiling before it was over-capped.
+    const modalHeight = Math.round(window.innerHeight * 0.85);
 
     const modal = document.createElement('div');
     modal.className = 'vorsum-modal';
@@ -5246,48 +5425,10 @@
       body.appendChild(advancedBody);
 
       if (advancedOpen) {
-        advancedBody.appendChild(
-          para(
-            "Warning! Advanced models require setting up custom API endpoints, base URLs, or local CORS settings. If you haven't used API tools before, I recommend starting with the default Gemini setup.",
-            true
-          )
-        );
-        const choiceRow = document.createElement('div');
-        choiceRow.style.cssText = 'display:flex;gap:6px';
-        const backBtn = document.createElement('button');
-        backBtn.className = 'vorsum-ctrl-btn';
-        backBtn.textContent = 'Take me back for now';
-        backBtn.style.cssText = 'flex:1;padding:5px 8px;border-width:1px;border-style:solid;border-radius:3px;cursor:pointer;font-size:11px !important';
-        backBtn.addEventListener('click', () => {
-          advancedOpen = false;
-          render();
-        });
-
-        const knowBtn = document.createElement('button');
-        knowBtn.className = 'vorsum-ctrl-btn';
-        knowBtn.disabled = true;
-        let remaining = 5;
-        knowBtn.textContent = `I know what I'm doing (${remaining})`;
-        knowBtn.style.cssText = 'flex:1;padding:5px 8px;border-width:1px;border-style:solid;border-radius:3px;cursor:pointer;font-size:11px !important';
-        countdownTimer = setInterval(() => {
-          remaining -= 1;
-          if (remaining <= 0) {
-            clearInterval(countdownTimer);
-            countdownTimer = null;
-            knowBtn.disabled = false;
-            knowBtn.textContent = "I know what I'm doing";
-          } else {
-            knowBtn.textContent = `I know what I'm doing (${remaining})`;
-          }
-        }, 1000);
-        knowBtn.addEventListener('click', () => {
-          close();
-          if (openCaptionProviderSettings) openCaptionProviderSettings();
-        });
-
-        choiceRow.appendChild(backBtn);
-        choiceRow.appendChild(knowBtn);
-        advancedBody.appendChild(choiceRow);
+        // Embed the real API Configuration form inline so setup can finish
+        // right here - no warning screen, no "cancel / I know" friction, and
+        // no leaving the tutorial to open Options.
+        advancedBody.appendChild(createApiConfigForm().el);
       }
 
       // -- technical details (nested popup) --
@@ -5329,6 +5470,11 @@
       hoverLine.style.marginTop = '22px';
       body.appendChild(hoverLine);
       body.appendChild(para('Videos with previously saved summaries have a blue tint.'));
+
+      const embedLine = para('Embeds on other sites also have a summary button.');
+      embedLine.style.marginTop = '18px';
+      embedLine.style.marginBottom = '18px';
+      body.appendChild(embedLine);
 
       // Mini copy of the collapsed floating widget dot.
       const dotRow = document.createElement('div');
@@ -5407,7 +5553,91 @@
     render();
   }
 
+  // ---- Embedded player support ----
+  // Inside an embed iframe the floating widget would sit on top of the video
+  // on the host page, so embeds get a single compact ∑ button overlaid on the
+  // player instead of the dot/panel. Detection is by URL path, which is the
+  // reliable signal (the script only ever runs on youtube.com).
+  function getEmbedVideoId() {
+    const m = location.pathname.match(/^\/embed\/([\w-]{6,})/);
+    return m ? m[1] : null;
+  }
+
+  function injectEmbedButton(videoId) {
+    if (document.getElementById('vorsum-embed-btn')) return;
+    const btn = document.createElement('button');
+    btn.id = 'vorsum-embed-btn';
+    btn.type = 'button';
+    btn.className = 'vorsum-btn';
+    btn.textContent = '\u2211';
+    btn.setAttribute('aria-label', 'Summarize');
+    btn.title = 'Summarize with Vorsum';
+    // Opt out of the shared hover-only visibility system so it can't set
+    // pointer-events:none on us (which made the button unclickable).
+    btn.dataset.vorsumOwnVisibility = 'true';
+    // min-width keeps it a circle at rest; width:auto lets it become a pill
+    // while busy/erroring (setButtonState writes "∑ - …" labels).
+    btn.style.cssText =
+      'position:fixed;top:50px;right:10px;z-index:2147483647;min-width:32px;height:32px;border-radius:16px;' +
+      'padding:0 9px;display:flex;align-items:center;justify-content:center;font-size:15px !important;font-weight:bold;' +
+      'cursor:pointer;border-width:1px;border-style:solid;box-shadow:0 2px 6px rgba(0,0,0,0.4);' +
+      'white-space:nowrap;overflow:hidden;opacity:0;pointer-events:none;' +
+      'transition:opacity 0.15s ease,transform 0.12s ease';
+
+    // Reveal on pointer movement, fade out after a short idle period; keep it
+    // pinned visible (sticky) while a request is running.
+    let hideTimer = null;
+    function showBtn(sticky) {
+      btn.style.opacity = '1';
+      btn.style.pointerEvents = 'auto';
+      clearTimeout(hideTimer);
+      // Stay put while a request is running (setButtonState marks it active).
+      if (!sticky && btn.dataset.vorsumActive !== 'true') hideTimer = setTimeout(hideBtn, 2200);
+    }
+    function hideBtn() {
+      btn.style.opacity = '0';
+      btn.style.pointerEvents = 'none';
+    }
+    document.addEventListener('mousemove', () => showBtn(false), { passive: true });
+    btn.addEventListener('mouseenter', () => showBtn(false));
+
+    // Resolve the video at click time so playlist/loop embeds summarize the
+    // video that's actually playing rather than only the one in the URL.
+    function currentVideoId() {
+      try {
+        const win = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
+        const fromPlayer = win?.ytInitialPlayerResponse?.videoDetails?.videoId;
+        if (fromPlayer) return fromPlayer;
+        const player = document.querySelector('#movie_player');
+        const data = player && typeof player.getVideoData === 'function' ? player.getVideoData() : null;
+        if (data && data.video_id) return data.video_id;
+      } catch (e) {
+        /* fall through to the URL-derived id */
+      }
+      return videoId;
+    }
+
+    btn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const id = currentVideoId();
+      log(`Embed: summarize clicked for ${id}`);
+      showBtn(true);
+      try {
+        Promise.resolve(handleClick(id, document, btn)).catch((err) =>
+          log(`Embed: summarize failed: ${err && err.message ? err.message : err}`, 'error')
+        );
+      } catch (err) {
+        log(`Embed: summarize failed: ${err && err.message ? err.message : err}`, 'error');
+      }
+    });
+    document.documentElement.appendChild(btn);
+    registerThemedEl(btn);
+    refreshButtonCachedVisual(btn, videoId);
+  }
+
   function ensureWidget() {
+    if (getEmbedVideoId()) return; // embeds get the compact ∑ button, not the floating widget
     if (!document.getElementById('vorsum-widget')) {
       buildWidget();
     }
@@ -5878,13 +6108,23 @@
       return;
     }
 
-    // URL mode is always Gemini (the one thing it can uniquely do); Caption
-    // mode routes through whichever provider is selected in Options.
+    // URL mode is always Gemini (the one thing it can uniquely do). This
+    // includes the Caption -> URL fall-back: even when Claude / an
+    // OpenAI-compatible or local endpoint is the primary Caption provider,
+    // the fallback is forced to Gemini here (and so uses the Gemini key).
     const provider = mode === 'url' ? 'gemini' : getLlmProvider();
     const adapter = LLM_PROVIDERS[provider];
     const creds = getProviderCredentials(provider);
 
     if (!creds.apiKey && provider !== 'openai_compatible') {
+      // The Caption -> URL fall-back needs a Gemini key specifically. If the
+      // only configured provider was, say, Claude or a local endpoint, say so
+      // explicitly instead of the generic "set a key" - the fix is different.
+      if (modeOverride === 'url') {
+        log('Fallback: URL mode needs a Gemini key, but none is configured - cannot fall back to URL mode', 'warn');
+        setButtonState(btn, 'URL fall-back needs a Gemini key', false);
+        return;
+      }
       log(`Click: no API key set for provider=${provider}, aborting`, 'warn');
       setButtonState(btn, 'Set API key in Options', false);
       return;
@@ -5903,8 +6143,6 @@
       return;
     }
 
-    const langSuffix = getSummaryLanguage().trim() ? ` Respond in ${getSummaryLanguage().trim()}.` : '';
-
     let promptText;
     let videoUri;
 
@@ -5917,7 +6155,7 @@
         } catch (e) {
           log(`Transcript fetch threw: ${e.message}`, 'error');
           if (getFallbackToUrlEnabled() && !urlModePermissionRejected) {
-            log('Fallback: captions failed, retrying in URL mode', 'info');
+            log('Fallback: captions failed, retrying via URL mode (Gemini)', 'info');
             return handleClick(videoId, card, btn, 1, 'url');
           }
           setButtonState(btn, 'Captions blocked - try URL mode', false);
@@ -5926,7 +6164,7 @@
         if (!transcript) {
           log('Transcript: none available for this video', 'warn');
           if (getFallbackToUrlEnabled() && !urlModePermissionRejected) {
-            log('Fallback: no captions available, retrying in URL mode', 'info');
+            log('Fallback: no captions available, retrying via URL mode (Gemini)', 'info');
             return handleClick(videoId, card, btn, 1, 'url');
           }
           setButtonState(btn, 'No captions available', false);
@@ -5937,9 +6175,9 @@
         log('Transcript: using cached transcript from a previous attempt');
       }
 
-      promptText = `${getEffectivePrompt()}${langSuffix}\n\nTranscript:\n${transcript}`;
+      promptText = `${buildSummaryPrompt(mode)}\n\nTranscript:\n${transcript}`;
     } else {
-      promptText = `${getEffectivePrompt()}${langSuffix}`;
+      promptText = buildSummaryPrompt(mode);
       videoUri = watchUrl;
       log(`URL mode: will send ${watchUrl} directly to Gemini, no local scraping`);
     }
@@ -6054,6 +6292,26 @@
           return;
         }
 
+        // Caption mode can flag the transcript as unusable (music/art video,
+        // lyrics, etc.). With the URL fall-back on, treat that as a soft
+        // failure and retry in URL mode; otherwise show a friendly message
+        // instead of the raw marker, and don't cache it.
+        if (mode === 'transcript' && CAPTION_UNUSABLE_RE.test(text)) {
+          log('Caption mode: model flagged the transcript as unusable (likely music/art)', 'warn');
+          if (getFallbackToUrlEnabled() && !urlModePermissionRejected) {
+            setButtonState(btn, 'Unusable captions - retrying via URL…', true);
+            Promise.resolve(handleClick(videoId, card, btn, 1, 'url')).catch((err) =>
+              log(`Fallback failed: ${err && err.message ? err.message : err}`, 'error')
+            );
+            return;
+          }
+          log('Caption mode: transcript unusable and URL fall-back is off', 'warn');
+          const friendly = "This looks like it may be a music or art video - the captions aren't usable for a summary.";
+          toggleSummaryOverlay(btn, friendly);
+          setButtonState(btn, 'Hide summary', false);
+          return;
+        }
+
         log(`Summary received (${text.length} chars), caching`);
         setCachedSummary(videoId, mode, text);
         bumpUsageCount();
@@ -6097,6 +6355,18 @@
 
   // ---- Watch for grid cards being added ----
   function scanForCards() {
+    // Embeds have no cards/watch toolbar - just the compact ∑ button, and
+    // only when enabled in Options.
+    const embedId = getEmbedVideoId();
+    if (embedId) {
+      if (getEmbedButtonEnabled()) {
+        injectEmbedButton(embedId);
+      } else {
+        const existing = document.getElementById('vorsum-embed-btn');
+        if (existing) existing.remove();
+      }
+      return;
+    }
     document.querySelectorAll(CARD_SELECTOR).forEach(injectButton);
     // Watch-page action toolbar (the \u2211 button that summarizes the page's
     // own video, as opposed to grid-card buttons). Both selectors are tried
@@ -6129,17 +6399,18 @@
   applyTheme();
   applyFontSize();
   applyHoverOnlySetting();
-  buildWidget();
+  ensureWidget(); // no-op on embed players - they get the compact ∑ button via scanForCards()
   scanForCards();
   runMigrationIfNeeded().then(() => cleanupLegacyStorage());
   checkCacheThreshold(); // in case the cache was already over threshold from a prior session
   checkForUpdate(); // throttled internally to once/day, harmless to call every load
 
-  if (!getOnboarded()) {
+  if (!getOnboarded() && !getEmbedVideoId()) {
     // Small delay so the modal doesn't compete with the page's own
     // first-paint/layout settling, and so the Vorapis detection check
     // (which reads whatever card elements exist right now) has a fair
-    // chance of finding them already rendered.
+    // chance of finding them already rendered. Skipped on embeds (a modal
+    // inside a small player iframe would be nonsense).
     setTimeout(() => showOnboarding(), 1500);
   }
 })();
