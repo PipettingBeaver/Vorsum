@@ -37,7 +37,7 @@ b. [https://chromewebstore.google.com/detail/violentmonkey/jinjaccalgkegednnccoh
 Copy and paste the vorsum userscript URL below, hosted on this github repo:
 
 ```js
-https://raw.githubusercontent.com/PipettingBeaver/Vorsum/refs/heads/main/Vorsum_Userscript.js
+https://github.com/PipettingBeaver/Vorsum/raw/refs/heads/main/Vorsum.user.js
 ```
 
 4. There is a quick onboarding for first-time initialization for getting set up, or you can follow the beginner setup guide included below.

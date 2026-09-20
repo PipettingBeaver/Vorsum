@@ -521,6 +521,7 @@
   // order the classes happen to appear in the element's className string.
   const THEME_CLASS_ORDER = [
     'vorsum-widget-panel',
+    'vorsum-dot',
     'vorsum-ctrl-btn',
     'vorsum-log',
     'vorsum-log-error',
@@ -547,6 +548,10 @@
     'vorsum-widget-panel': {
       light: { background: '#ffffff', color: '#000000', borderColor: '#cccccc', colorScheme: 'light' },
       dark: { background: '#1e1e1e', color: '#f0f0f0', borderColor: '#444444', colorScheme: 'dark' }
+    },
+    'vorsum-dot': {
+      light: { background: '#f4f4f4', color: '#333333', borderColor: '#cccccc', colorScheme: 'light' },
+      dark: { background: '#2c2c2c', color: '#f0f0f0', borderColor: '#666666', colorScheme: 'dark' }
     },
     'vorsum-ctrl-btn': {
       light: { background: '#f0f0f0', color: '#000000', borderColor: '#999999' },
@@ -810,8 +815,89 @@
   }
 
   // ---- Debug log ----
+  // Per-page in-memory buffer (the live view) PLUS a shared, per-tab rolling
+  // cache in GM storage so a report filed from a main tab can include entries
+  // from other tabs/embeds, which live in separate JS contexts. Each page owns
+  // its own `vorsum_log_<tab>` key, so there's no read-modify-write clobbering
+  // between tabs; GM storage is manager-level (not partitioned per top-level
+  // site) so embed logs are visible too.
   const logBuffer = [];
   let logPanelEl = null;
+
+  const TAB_ID = 't' + Math.random().toString(36).slice(2, 7);
+  const LOG_CONTEXT = (() => {
+    try {
+      return location.pathname.startsWith('/embed/') ? 'embed' : 'main';
+    } catch (e) {
+      return 'main';
+    }
+  })();
+  const LOG_TAG = `${TAB_ID} ${LOG_CONTEXT}`;
+  const SHARED_LOG_PREFIX = 'vorsum_log_';
+  const SHARED_LOG_MAX = 300;
+  const SHARED_LOG_TTL_MS = 60 * 60 * 1000; // drop other tabs' caches after 1h
+  function mySharedLogKey() {
+    return SHARED_LOG_PREFIX + TAB_ID;
+  }
+
+  let sharedFlushTimer = null;
+  function flushSharedLog() {
+    if (sharedFlushTimer) {
+      clearTimeout(sharedFlushTimer);
+      sharedFlushTimer = null;
+    }
+    const lines = logBuffer.slice(-SHARED_LOG_MAX).map((e) => ({ ts: e.ts, level: e.level, line: e.line }));
+    try {
+      GM_setValue(mySharedLogKey(), { tab: TAB_ID, ctx: LOG_CONTEXT, updatedAt: Date.now(), lines });
+    } catch (e) {
+      /* best-effort diagnostics - never let a log write break the page */
+    }
+  }
+  // Debounced, event-driven - NOT an interval. One write per burst of
+  // activity; warn/error flush almost immediately. An idle page writes nothing.
+  function scheduleSharedFlush(delay) {
+    clearTimeout(sharedFlushTimer);
+    sharedFlushTimer = setTimeout(() => {
+      sharedFlushTimer = null;
+      flushSharedLog();
+    }, delay);
+  }
+  function pruneSharedLogs() {
+    const now = Date.now();
+    try {
+      GM_listValues().forEach((k) => {
+        if (!k.startsWith(SHARED_LOG_PREFIX) || k === mySharedLogKey()) return;
+        const rec = GM_getValue(k, null);
+        if (!rec || !rec.updatedAt || now - rec.updatedAt > SHARED_LOG_TTL_MS) GM_deleteValue(k);
+      });
+    } catch (e) {
+      /* best-effort */
+    }
+  }
+  // Merged view for the debug panel + bug report: this tab's live buffer plus
+  // every other tab's persisted cache, oldest first, each tagged tab/context.
+  function getMergedLogEntries() {
+    const out = [];
+    try {
+      GM_listValues().forEach((k) => {
+        if (!k.startsWith(SHARED_LOG_PREFIX) || k === mySharedLogKey()) return;
+        const rec = GM_getValue(k, null);
+        if (!rec || !Array.isArray(rec.lines)) return;
+        const tag = `${rec.tab} ${rec.ctx}`;
+        rec.lines.forEach((l) => out.push({ ts: l.ts || 0, line: l.line, level: l.level, tag }));
+      });
+    } catch (e) {
+      /* best-effort */
+    }
+    logBuffer.forEach((e) => out.push({ ts: e.ts, line: e.line, level: e.level, tag: LOG_TAG }));
+    out.sort((a, b) => a.ts - b.ts);
+    return out;
+  }
+  function formatMergedLog() {
+    return getMergedLogEntries()
+      .map((e) => `[${e.tag}] ${e.line}`)
+      .join('\n');
+  }
 
   function fmtTime() {
     const d = new Date();
@@ -819,22 +905,25 @@
   }
 
   function log(msg, level = 'info') {
+    const ts = Date.now();
     const line = `[${fmtTime()}] ${msg}`;
-    logBuffer.push({ line, level });
+    logBuffer.push({ ts, line, level, msg });
     if (logBuffer.length > 500) logBuffer.shift();
 
     const consoleFn = level === 'error' ? console.error : level === 'warn' ? console.warn : console.log;
     consoleFn(`[vorsum] ${msg}`);
 
     if (getDebugOn() && logPanelEl) {
-      renderLogLine(line, level);
+      renderLogLine({ ts, line, level, tag: LOG_TAG });
     }
+
+    scheduleSharedFlush(level === 'warn' || level === 'error' ? 300 : 5000);
   }
 
-  function renderLogLine(line, level) {
+  function renderLogLine(entry) {
     const row = document.createElement('div');
-    row.textContent = line;
-    row.className = level === 'error' ? 'vorsum-log-error' : level === 'warn' ? 'vorsum-log-warn' : 'vorsum-log-info';
+    row.textContent = `[${entry.tag}] ${entry.line}`;
+    row.className = entry.level === 'error' ? 'vorsum-log-error' : entry.level === 'warn' ? 'vorsum-log-warn' : 'vorsum-log-info';
     logPanelEl.appendChild(row);
     logPanelEl.scrollTop = logPanelEl.scrollHeight;
     registerThemedEl(row);
@@ -843,8 +932,16 @@
   function renderFullLog() {
     if (!logPanelEl) return;
     logPanelEl.replaceChildren();
-    logBuffer.forEach((entry) => renderLogLine(entry.line, entry.level));
+    getMergedLogEntries().forEach(renderLogLine);
   }
+
+  // Persist on hide/close so a closing tab isn't lost, and drop stale
+  // per-tab caches once per load.
+  window.addEventListener('pagehide', flushSharedLog);
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') flushSharedLog();
+  });
+  pruneSharedLogs();
 
   // ---- History storage (IndexedDB) ----
   // Why IndexedDB instead of GM_setValue: GM storage has no listing/query
@@ -2032,6 +2129,7 @@
   let historyOffset = 0;
   let historySearchQuery = '';
   let loadHistoryRef = null; // set inside buildWidget - lets outer-scope handlers (cache warning) refresh an open History list
+  let revealNewestHistoryRef = null; // set inside buildWidget - refresh History and expand its newest summary
 
   // "N new - (re)open to view" notice state. Deliberately not auto-updating
   // the rendered list when new entries land (even if History is currently
@@ -2074,9 +2172,22 @@
       }
     }
     if (!fromRemote) checkCacheThreshold(); // only the tab that actually grew the cache needs to check
+    // Exactly one new summary while the full UI (History) is open: also show
+    // that newest summary rather than only the yellow notice bar.
+    if (historyPanelOpen && pendingNewHistoryCount === 1) revealNewestHistoryRef?.();
   }
 
   function renderHistoryNotice() {
+    // Collapsed floating dot: show an "N new ✉" badge when there are unread
+    // entries (the in-panel yellow bar covers the expanded case).
+    if (widgetDotBadgeEl) {
+      if (pendingNewHistoryCount > 0 && getWidgetCollapsed()) {
+        widgetDotBadgeEl.textContent = `${pendingNewHistoryCount} new \u2709`;
+        widgetDotBadgeEl.style.display = 'block';
+      } else {
+        widgetDotBadgeEl.style.display = 'none';
+      }
+    }
     if (!historyNoticeEl) return;
     if (pendingNewHistoryCount <= 0) {
       historyNoticeEl.style.display = 'none';
@@ -2086,6 +2197,80 @@
     const plural = pendingNewHistoryCount === 1 ? '' : 's';
     historyNoticeEl.textContent = `${pendingNewHistoryCount} new summar${plural === '' ? 'y' : 'ies'} - ${verb} to view`;
     historyNoticeEl.style.display = 'block';
+  }
+
+  // ---- Interrupted-summary resume queue ----
+  // A summary request is owned by the tab that started it, so closing that tab
+  // mid-request drops the result. To avoid losing it entirely, the job is
+  // recorded here when it starts and cleared when it concludes (success or a
+  // definitive give-up). On a later page load any leftover job is re-run; its
+  // result lands in History and is announced via the notice/badge rather than
+  // an overlay. This is also the natural seam for moving the work into an
+  // extension background context later.
+  const PENDING_JOBS_KEY = 'vorsum_pending_jobs';
+  function getPendingJobs() {
+    const raw = GM_getValue(PENDING_JOBS_KEY, []);
+    return Array.isArray(raw) ? raw : [];
+  }
+  function addPendingJob(videoId, mode) {
+    const id = `${mode}_${videoId}`;
+    const jobs = getPendingJobs();
+    if (jobs.some((j) => j.id === id)) return;
+    jobs.push({ id, videoId, mode, startedAt: Date.now() });
+    GM_setValue(PENDING_JOBS_KEY, jobs);
+    log(`Pending jobs: started ${id} (${jobs.length} in progress)`);
+  }
+  function clearPendingJob(videoId, mode) {
+    const id = `${mode}_${videoId}`;
+    const jobs = getPendingJobs();
+    const next = jobs.filter((j) => j.id !== id);
+    if (next.length !== jobs.length) {
+      GM_setValue(PENDING_JOBS_KEY, next);
+      log(`Pending jobs: finished ${id} (${next.length} in progress)`);
+    }
+  }
+
+  // Re-runs summaries that were interrupted (usually a tab closed mid-request).
+  async function resumePendingJobs() {
+    const jobs = getPendingJobs();
+    if (!jobs.length) return;
+    log(`Pending jobs: found ${jobs.length} unfinished summar${jobs.length === 1 ? 'y' : 'ies'} - resuming`);
+    for (const job of jobs) {
+      // If it actually completed before the tab died (result landed but the
+      // clear didn't), don't redo the work.
+      if (getCachedSummary(job.videoId, job.mode)) {
+        clearPendingJob(job.videoId, job.mode);
+        continue;
+      }
+      // When Web Locks is available, handleClick acquires the job's lock with
+      // ifAvailable, so a live job in another tab is skipped automatically.
+      // Without locks, fall back to a staleness check: only resume once the
+      // originator's request would have timed out, so a fresh job isn't redone.
+      const locksAvailable =
+        typeof navigator !== 'undefined' && !!navigator.locks && typeof navigator.locks.request === 'function';
+      if (!locksAvailable) {
+        const staleAfter = (TIMEOUT_MS[job.mode] || 180000) + 30000;
+        if (Date.now() - (job.startedAt || 0) < staleAfter) {
+          log(`Pending jobs: ${job.id} is recent and Web Locks is unavailable - leaving it to the tab that started it`);
+          continue;
+        }
+      }
+      // Detached button + card: handleClick sees the button as off-screen (so
+      // the result is saved to History and announced via the notice/badge, not
+      // an overlay), and the empty card makes the recorded title fall back to
+      // the video id rather than this page's title.
+      const ghostBtn = document.createElement('button');
+      ghostBtn.className = 'vorsum-btn';
+      ghostBtn.dataset.vorsumVideoId = job.videoId;
+      ghostBtn.textContent = '\u2211';
+      const ghostCard = document.createElement('div');
+      log(`Pending jobs: resuming ${job.id}`);
+      try {
+        await handleClick(job.videoId, ghostCard, ghostBtn, 1, job.mode);
+      } catch (e) {
+        log(`Pending jobs: resume failed for ${job.id}: ${e.message}`, 'error');
+      }
+    }
   }
 
   // ---- Generic small modal (Data & Privacy, Stats & Data) ----
@@ -2662,8 +2847,8 @@
       field(detailsBody, 'Page URL', 'pageUrl', { rows: 1, value: location.href });
       field(detailsBody, 'Debug log (Options → Troubleshooting → Debug: ON)', 'log', {
         rows: 8,
-        value: logBuffer.map((e) => e.line).join('\n'),
-        refresh: () => logBuffer.map((e) => e.line).join('\n'),
+        value: formatMergedLog(),
+        refresh: () => formatMergedLog(),
         mono: true
       });
 
@@ -2793,6 +2978,7 @@
   let widgetPanelEl = null;
   let openCaptionProviderSettings = null; // set inside buildWidget() - opens Options + focuses the LLM provider picker
   let widgetDotEl = null;
+  let widgetDotBadgeEl = null; // "N new ✉" badge shown beside the collapsed dot
 
   // Shared by the widget's vertical offset (below) and the summary
   // overlay's z-index (see getOverlayZIndex, near toggleSummaryOverlay) -
@@ -2841,6 +3027,12 @@
       widgetDotEl.style.right = right;
       widgetDotEl.style.top = top;
       widgetDotEl.style.left = '';
+    }
+    if (widgetDotBadgeEl) {
+      // Sits just left of the dot, vertically centered on it.
+      widgetDotBadgeEl.style.right = `${pos.right + 52}px`;
+      widgetDotBadgeEl.style.top = `${pos.top + 12}px`;
+      widgetDotBadgeEl.style.left = '';
     }
   }
 
@@ -3169,6 +3361,40 @@
       'touch-action:none',
       'display:none'
     ].join(';');
+    registerThemedEl(dot); // theme-reactive via the 'vorsum-dot' entry (light/dark)
+
+    // "N new ✉" badge shown beside the dot when there are unread summaries.
+    // Clicking it opens the panel with History and (for a single new entry)
+    // shows that newest summary.
+    const dotNewBadge = document.createElement('div');
+    dotNewBadge.id = 'vorsum-dot-badge';
+    dotNewBadge.style.cssText = [
+      'position:fixed',
+      'z-index:2147483647',
+      'display:none',
+      'padding:3px 8px',
+      'border-radius:12px',
+      'background:#c0392b',
+      'color:#ffffff',
+      'font-size:10px !important',
+      'font-weight:bold',
+      'font-family:sans-serif',
+      'line-height:1.2',
+      'cursor:pointer',
+      'box-shadow:0 2px 6px rgba(0,0,0,0.35)',
+      'white-space:nowrap',
+      'user-select:none',
+      'transition:transform 0.12s ease'
+    ].join(';');
+    dotNewBadge.title = 'New summaries - open History';
+    dotNewBadge.addEventListener('mouseenter', () => { dotNewBadge.style.transform = 'scale(1.06)'; });
+    dotNewBadge.addEventListener('mouseleave', () => { dotNewBadge.style.transform = ''; });
+    dotNewBadge.addEventListener('click', () => {
+      const wasSingle = pendingNewHistoryCount === 1;
+      expand();
+      showHistoryPanel(wasSingle);
+    });
+    widgetDotBadgeEl = dotNewBadge;
 
     const panel = document.createElement('div');
     panel.id = 'vorsum-widget';
@@ -3769,12 +3995,13 @@
     const promptLabel = document.createElement('div');
     promptLabel.className = 'vorsum-label';
     promptLabel.style.cssText = 'font-size:10px !important;margin-top:2px';
-    promptLabel.textContent = 'Custom summarization prompt (blank = default)';
+    promptLabel.textContent = 'Custom summarization prompt (prefilled with the default - edit freely)';
 
     const promptTextarea = document.createElement('textarea');
     promptTextarea.className = 'vorsum-textarea';
-    promptTextarea.placeholder = SUMMARY_PROMPT;
-    promptTextarea.value = getCustomPrompt();
+    // Prefill with a copy of the default so it can be used as a basis and
+    // edited, rather than starting blank. Falls back to any saved custom prompt.
+    promptTextarea.value = getCustomPrompt().trim() || SUMMARY_PROMPT;
     promptTextarea.rows = 4;
     promptTextarea.style.cssText = 'font-size:11px !important;padding:4px 5px;border-width:1px;border-style:solid;border-radius:3px;font-family:inherit;resize:vertical';
 
@@ -3786,8 +4013,9 @@
     savePromptBtn.textContent = 'Save prompt';
     savePromptBtn.style.cssText = btnStyle + ';flex:1';
     savePromptBtn.addEventListener('click', () => {
-      setCustomPrompt(promptTextarea.value);
-      log('Custom prompt saved' + (promptTextarea.value.trim() ? '' : ' (empty - using default)'));
+      const val = promptTextarea.value;
+      setCustomPrompt(val);
+      log('Custom prompt saved' + (val.trim() ? '' : ' (empty - using default)'));
       savePromptBtn.textContent = 'Saved!';
       setTimeout(() => (savePromptBtn.textContent = 'Save prompt'), 1000);
     });
@@ -3797,9 +4025,11 @@
     resetPromptBtn.textContent = 'Reset to default';
     resetPromptBtn.style.cssText = btnStyle + ';flex:1';
     resetPromptBtn.addEventListener('click', () => {
-      promptTextarea.value = '';
+      // Regenerate the editable copy from the hard-coded default and drop the
+      // saved custom prompt, so the effective prompt is the default again.
+      promptTextarea.value = SUMMARY_PROMPT;
       setCustomPrompt('');
-      log('Custom prompt cleared - using default');
+      log('Custom prompt reset to default');
     });
 
     promptButtonsRow.appendChild(savePromptBtn);
@@ -3992,7 +4222,7 @@
       actionsRow.style.cssText = 'display:flex;gap:4px;margin-top:2px';
 
       const viewBtn = document.createElement('button');
-      viewBtn.className = 'vorsum-ctrl-btn';
+      viewBtn.className = 'vorsum-ctrl-btn vorsum-history-view-btn';
       viewBtn.textContent = 'View summary';
       viewBtn.style.cssText = btnStyle + ';font-size:10px !important;padding:1px 4px';
       viewBtn.addEventListener('click', () => {
@@ -4129,13 +4359,25 @@
     // other, so the two sub-panels never stack. Centralized here so the
     // buttons, the history notice banner, and onboarding's jump-to-options
     // all enforce the same rule.
-    function showHistoryPanel() {
+    // Expands the newest History row's summary. `reload` refreshes the list
+    // first (needed when a new entry arrived while the list was already open).
+    async function autoExpandNewestHistorySummary(reload) {
+      if (reload) await loadHistory(true);
+      const viewBtn = historyList.querySelector('.vorsum-history-view-btn');
+      if (viewBtn) viewBtn.click();
+    }
+    revealNewestHistoryRef = () => autoExpandNewestHistorySummary(true);
+
+    function showHistoryPanel(autoExpandNewest = false) {
+      const single = pendingNewHistoryCount === 1;
       historyPanel.style.display = 'flex';
       historyPanelOpen = true;
       optionsPanel.style.display = 'none';
-      loadHistory(true);
       pendingNewHistoryCount = 0;
       renderHistoryNotice();
+      loadHistory(true).then(() => {
+        if (autoExpandNewest && single) autoExpandNewestHistorySummary(false);
+      });
     }
     function showOptionsPanel() {
       optionsPanel.style.display = 'flex';
@@ -4151,11 +4393,11 @@
         historyPanel.style.display = 'none';
         historyPanelOpen = false;
       } else {
-        showHistoryPanel();
+        showHistoryPanel(true);
       }
     });
 
-    historyNotice.addEventListener('click', showHistoryPanel);
+    historyNotice.addEventListener('click', () => showHistoryPanel(true));
 
     optionsBtn.addEventListener('click', () => {
       const showing = optionsPanel.style.display !== 'none';
@@ -4168,11 +4410,12 @@
 
     clearBtn.addEventListener('click', () => {
       logBuffer.length = 0;
+      flushSharedLog(); // clear this tab's shared cache too, so it doesn't reappear
       renderFullLog();
     });
 
     copyBtn.addEventListener('click', async () => {
-      const text = logBuffer.map((e) => e.line).join('\n');
+      const text = formatMergedLog();
       try {
         await navigator.clipboard.writeText(text);
         copyBtn.textContent = 'Copied!';
@@ -4186,11 +4429,13 @@
       setWidgetCollapsed(true);
       panel.style.display = 'none';
       dot.style.display = 'flex';
+      renderHistoryNotice(); // update the dot's "N new" badge
     }
     function expand() {
       setWidgetCollapsed(false);
       panel.style.display = 'flex';
       dot.style.display = 'none';
+      renderHistoryNotice(); // hide the dot's "N new" badge while expanded
     }
     minBtn.addEventListener('click', collapse);
     // The dot is both draggable (to move the shared position) and tappable
@@ -4228,6 +4473,7 @@
 
     document.documentElement.appendChild(panel);
     document.documentElement.appendChild(dot);
+    document.documentElement.appendChild(dotNewBadge);
 
     registerThemedSubtree(panel);
 
@@ -4283,10 +4529,12 @@
       if (fs) {
         panel.style.display = 'none';
         dot.style.display = 'none';
+        if (widgetDotBadgeEl) widgetDotBadgeEl.style.display = 'none';
       } else {
         const collapsed = getWidgetCollapsed();
         panel.style.display = collapsed ? 'none' : 'flex';
         dot.style.display = collapsed ? 'flex' : 'none';
+        renderHistoryNotice(); // restore the "N new" badge if there are unread entries
       }
     }
     document.addEventListener('fullscreenchange', () => {
@@ -4528,10 +4776,13 @@
     // Static copy of the collapsed floating widget dot (V∑), for the recap slide.
     function makeWidgetDotMock() {
       const dot = document.createElement('div');
+      // 'vorsum-dot' makes it pick up the same light/dark theme as the real
+      // floating dot (registerThemedSubtree(backdrop) runs after each render).
+      dot.className = 'vorsum-dot';
       dot.textContent = 'V\u2211';
       dot.setAttribute('aria-hidden', 'true');
       dot.style.cssText =
-        'width:44px;height:44px;border-radius:50%;background:#f4f4f4;color:#333333;border:1px solid #cccccc;display:flex;align-items:center;justify-content:center;font-size:16px;font-weight:bold;font-family:sans-serif;line-height:1;box-shadow:0 2px 6px rgba(0,0,0,0.35);user-select:none;flex:0 0 auto';
+        'width:44px;height:44px;border-radius:50%;border-width:1px;border-style:solid;display:flex;align-items:center;justify-content:center;font-size:16px;font-weight:bold;font-family:sans-serif;line-height:1;box-shadow:0 2px 6px rgba(0,0,0,0.35);user-select:none;flex:0 0 auto';
       return dot;
     }
     // Inline SVG helpers - Trusted Types CSP blocks innerHTML, so icons are
@@ -6195,9 +6446,12 @@
         setTimeout(() => handleClick(videoId, card, btn, attempt + 1, modeOverride), delayMs);
       } else {
         log(`Giving up: ${reasonLabel}`, 'error');
+        clearPendingJob(videoId, mode);
         setButtonState(btn, reasonLabel, false);
       }
     }
+
+    addPendingJob(videoId, mode); // recorded so a tab close mid-request doesn't lose the work
 
     const { url: reqUrl, headers: reqHeaders, body: payload } = adapter.buildRequest({
       apiKey: creds.apiKey,
@@ -6217,14 +6471,22 @@
       clearInterval(heartbeat);
     }
 
-    GM_xmlhttpRequest({
-      method: 'POST',
-      url: reqUrl,
-      headers: reqHeaders,
-      timeout: timeoutMs,
-      data: payload,
-      onload: (res) => {
-        stopHeartbeat();
+    // The request is wrapped in a promise and (when available) held under a
+    // Web Lock named for this job, so another tab's resume pass can tell a
+    // live job from an abandoned one and skip duplicate work. The lock is
+    // released when the promise settles (load/timeout/error) and automatically
+    // by the browser if this tab dies.
+    const runRequest = () =>
+      new Promise((resolve) => {
+        GM_xmlhttpRequest({
+          method: 'POST',
+          url: reqUrl,
+          headers: reqHeaders,
+          timeout: timeoutMs,
+          data: payload,
+          onload: (res) => {
+            try {
+              stopHeartbeat();
         const elapsedS = Math.round((performance.now() - startedAt) / 1000);
         log(`Response received after ${elapsedS}s: HTTP ${res.status}`);
 
@@ -6234,6 +6496,7 @@
         } catch (e) {
           log(`Response body was not valid JSON: ${e.message}`, 'error');
           console.log('[vorsum] raw response:', res.responseText);
+          clearPendingJob(videoId, mode);
           setButtonState(btn, 'Bad response - see console', false);
           return;
         }
@@ -6253,6 +6516,7 @@
           // the key already proved it accepts.
           if (mode === 'url' && res.status === 403) {
             urlModePermissionRejected = true;
+            clearPendingJob(videoId, mode); // this URL job is done; the caption retry records its own
             log('URL mode: API rejected the video input (403 permission) - retrying in caption mode', 'warn');
             return handleClick(videoId, card, btn, 1, 'transcript');
           }
@@ -6267,6 +6531,7 @@
           if (isQuotaOrRateLimit) {
             rateLimitedUntil = Date.now() + RATE_LIMIT_COOLDOWN_MS;
             renderRateLimitNotice();
+            clearPendingJob(videoId, mode);
             setButtonState(btn, 'Rate-limited - see notice above', false);
             log('API quota/rate limit hit - pausing further attempts for a cooldown period', 'warn');
             return;
@@ -6279,6 +6544,7 @@
           }
 
           const short = result.error.slice(0, 40);
+          clearPendingJob(videoId, mode);
           setButtonState(btn, isTransient ? 'Server busy - try later' : `Err: ${short}`, false);
           btn.title = result.error;
           return;
@@ -6288,6 +6554,7 @@
         if (!text) {
           log('Response had no text - see console for full payload', 'warn');
           console.warn('[vorsum] No text in response:', data);
+          clearPendingJob(videoId, mode);
           setButtonState(btn, 'No summary - see console', false);
           return;
         }
@@ -6298,6 +6565,7 @@
         // instead of the raw marker, and don't cache it.
         if (mode === 'transcript' && CAPTION_UNUSABLE_RE.test(text)) {
           log('Caption mode: model flagged the transcript as unusable (likely music/art)', 'warn');
+          clearPendingJob(videoId, mode);
           if (getFallbackToUrlEnabled() && !urlModePermissionRejected) {
             setButtonState(btn, 'Unusable captions - retrying via URL…', true);
             Promise.resolve(handleClick(videoId, card, btn, 1, 'url')).catch((err) =>
@@ -6314,6 +6582,7 @@
 
         log(`Summary received (${text.length} chars), caching`);
         setCachedSummary(videoId, mode, text);
+        clearPendingJob(videoId, mode);
         bumpUsageCount();
         refreshButtonCachedVisual(btn, videoId);
 
@@ -6338,19 +6607,41 @@
         }
 
         historyRecordSummary({ videoId, mode, title: cardTitle, url: watchUrl, channelName: channelInfo.name, channelUrl: channelInfo.url, summary: text });
-      },
-      ontimeout: () => {
-        stopHeartbeat();
-        const elapsedS = Math.round((performance.now() - startedAt) / 1000);
-        log(`Request timed out after ${elapsedS}s (limit ${Math.round(timeoutMs / 1000)}s, mode=${mode})`, 'error');
-        retryOrFail('Timed out - see console', true);
-      },
-      onerror: (err) => {
-        stopHeartbeat();
-        log(`Network/transport error: ${JSON.stringify(err)}`, 'error');
-        retryOrFail('Failed - see console', true);
-      }
-    });
+            } finally {
+              resolve();
+            }
+          },
+          ontimeout: () => {
+            stopHeartbeat();
+            const elapsedS = Math.round((performance.now() - startedAt) / 1000);
+            log(`Request timed out after ${elapsedS}s (limit ${Math.round(timeoutMs / 1000)}s, mode=${mode})`, 'error');
+            retryOrFail('Timed out - see console', true);
+            resolve();
+          },
+          onerror: (err) => {
+            stopHeartbeat();
+            log(`Network/transport error: ${JSON.stringify(err)}`, 'error');
+            retryOrFail('Failed - see console', true);
+            resolve();
+          }
+        });
+      });
+
+    const jobLockName = `vorsum-job-${mode}_${videoId}`;
+    const locksAvailable =
+      typeof navigator !== 'undefined' && !!navigator.locks && typeof navigator.locks.request === 'function';
+    if (locksAvailable) {
+      await navigator.locks.request(jobLockName, { ifAvailable: true }, async (lock) => {
+        if (!lock) {
+          log(`Job lock: ${jobLockName} held by another tab - skipping duplicate work`, 'warn');
+          setButtonState(btn, 'Summarizing in another tab…', false);
+          return;
+        }
+        await runRequest();
+      });
+    } else {
+      await runRequest();
+    }
   }
 
   // ---- Watch for grid cards being added ----
@@ -6413,4 +6704,8 @@
     // inside a small player iframe would be nonsense).
     setTimeout(() => showOnboarding(), 1500);
   }
+
+  // Resume any summary that was interrupted (typically a tab closed while its
+  // request was in flight). Delayed so it doesn't compete with page load.
+  if (!getEmbedVideoId()) setTimeout(resumePendingJobs, 4000);
 })();
