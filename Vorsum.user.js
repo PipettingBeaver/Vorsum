@@ -2,7 +2,7 @@
 // @name         Vorsum - Youtube Summary Button
 // @namespace    https://github.com/PipettingBeaver/Vorsum
 // @icon         https://s.ytimg.com/yts/img/favicon_32-vflWoMFGx.png
-// @version      1.1.1
+// @version      1.1.2
 // @description  Adds a click-to-summarize button to YouTube grid cards. Two modes: caption-transcript or direct-URL (Gemini watches the video itself). Beginner friendly and includes a tutorial.
 // @match        https://www.youtube.com/*
 // @grant        GM_xmlhttpRequest
@@ -478,6 +478,138 @@
       },
       onerror: () => log('Update check: network error', 'warn'),
       ontimeout: () => log('Update check: timed out', 'warn')
+    });
+  }
+
+  // ---- Changelog / "What's new" ----
+  // changelog.json lives on the repo; fetched lazily (only when the version
+  // changed and the cache is stale, or on demand) and cached in GM storage -
+  // never bundled, never on a fixed interval.
+  const CHANGELOG_RAW_URL = 'https://raw.githubusercontent.com/PipettingBeaver/Vorsum/refs/heads/main/changelog.json';
+  const CHANGELOG_CACHE_KEY = 'vorsum_changelog_cache';
+  const CHANGELOG_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
+  const LAST_SEEN_VERSION_KEY = 'vorsum_last_seen_version';
+  let whatsNewNoticeEl = null;
+
+  function getCachedChangelog() {
+    const cache = GM_getValue(CHANGELOG_CACHE_KEY, null);
+    return cache && Array.isArray(cache.data) ? cache : null;
+  }
+  function fetchChangelog(force) {
+    const cache = getCachedChangelog();
+    if (!force && cache && Date.now() - (cache.fetchedAt || 0) < CHANGELOG_CHECK_INTERVAL_MS) {
+      return Promise.resolve(cache.data);
+    }
+    return new Promise((resolve) => {
+      GM_xmlhttpRequest({
+        method: 'GET',
+        url: CHANGELOG_RAW_URL,
+        timeout: 15000,
+        onload: (res) => {
+          if (res.status < 200 || res.status >= 300) {
+            resolve(cache ? cache.data : null);
+            return;
+          }
+          try {
+            const data = JSON.parse(res.responseText);
+            if (Array.isArray(data)) {
+              GM_setValue(CHANGELOG_CACHE_KEY, { fetchedAt: Date.now(), data });
+              resolve(data);
+            } else {
+              resolve(cache ? cache.data : null);
+            }
+          } catch (e) {
+            resolve(cache ? cache.data : null);
+          }
+        },
+        onerror: () => resolve(cache ? cache.data : null),
+        ontimeout: () => resolve(cache ? cache.data : null)
+      });
+    });
+  }
+  function findChangelogEntry(data, version) {
+    if (!Array.isArray(data)) return null;
+    return data.find((e) => e && e.version === version) || null;
+  }
+
+  // Fetches if needed, then shows a version's changes in the generic modal.
+  function openWhatsNew(version) {
+    const target = version || getVersion();
+    fetchChangelog(true).then(() => showChangelogModal(target));
+  }
+
+  function showChangelogModal(version) {
+    const data = getCachedChangelog() ? getCachedChangelog().data : null;
+    const entry = findChangelogEntry(data, version);
+    showSimpleModal(`What's new in v${version}`, (body) => {
+      if (!entry) {
+        addModalParagraph(body, 'No changelog details are available right now (offline or not published yet).');
+      } else {
+        const ul = document.createElement('ul');
+        ul.style.cssText = 'margin:0 0 12px;padding-left:18px';
+        (entry.changes || []).forEach((c) => {
+          const li = document.createElement('li');
+          li.textContent = c;
+          li.style.cssText = 'margin-bottom:6px';
+          ul.appendChild(li);
+        });
+        body.appendChild(ul);
+      }
+      const link = document.createElement('a');
+      link.href = CHANGELOG_RAW_URL;
+      link.target = '_blank';
+      link.rel = 'noopener noreferrer';
+      link.textContent = 'See the full changelog';
+      link.className = 'vorsum-history-title';
+      link.style.cssText = 'text-decoration:underline';
+      registerThemedEl(link);
+      body.appendChild(link);
+    });
+  }
+
+  // One-time, dismissible in-panel banner when the running version is newer
+  // than the last one seen and is flagged `highlight` in changelog.json.
+  function showWhatsNewBanner(entry) {
+    if (!whatsNewNoticeEl) return;
+    whatsNewNoticeEl.replaceChildren();
+    const msg = document.createElement('span');
+    msg.textContent = `\u2728 What's new in v${entry.version} - click to see`;
+    msg.style.cssText = 'cursor:pointer;flex:1';
+    msg.addEventListener('click', () => {
+      whatsNewNoticeEl.style.display = 'none';
+      showChangelogModal(entry.version);
+    });
+    const dismiss = document.createElement('button');
+    dismiss.className = 'vorsum-ctrl-btn';
+    dismiss.textContent = '\u00d7';
+    dismiss.title = 'Dismiss';
+    dismiss.style.cssText = 'padding:0 5px;font-size:11px !important;margin-left:4px';
+    dismiss.addEventListener('click', () => {
+      whatsNewNoticeEl.style.display = 'none';
+    });
+    whatsNewNoticeEl.appendChild(msg);
+    whatsNewNoticeEl.appendChild(dismiss);
+    whatsNewNoticeEl.style.display = 'flex';
+    registerThemedSubtree(whatsNewNoticeEl);
+  }
+
+  function checkWhatsNew() {
+    const current = getVersion();
+    const lastSeen = GM_getValue(LAST_SEEN_VERSION_KEY, null);
+    if (lastSeen === null) {
+      GM_setValue(LAST_SEEN_VERSION_KEY, current); // first ever run - record silently
+      return;
+    }
+    if (lastSeen === current) return;
+    // Version changed since last seen. Defer to onboarding/update banners.
+    if (onboardingModalOpen) return;
+    if (updateNoticeEl && updateNoticeEl.style.display !== 'none') return;
+    fetchChangelog(false).then((data) => {
+      GM_setValue(LAST_SEEN_VERSION_KEY, current); // mark seen regardless of what we show
+      const entry = findChangelogEntry(data, current);
+      if (!entry || entry.highlight === false) return;
+      if (onboardingModalOpen) return;
+      showWhatsNewBanner(entry);
     });
   }
 
@@ -3641,6 +3773,12 @@
     updateNotice.addEventListener('click', () => window.open(REPO_PAGE_URL, '_blank'));
     updateNoticeEl = updateNotice;
 
+    const whatsNewNotice = document.createElement('div');
+    whatsNewNotice.className = 'vorsum-banner';
+    whatsNewNotice.style.cssText =
+      'display:none;align-items:center;gap:4px;padding:5px 6px;font-size:10px !important;border-width:1px;border-style:solid;border-radius:3px;text-align:left';
+    whatsNewNoticeEl = whatsNewNotice;
+
     const noKeyNotice = document.createElement('div');
     noKeyNotice.className = 'vorsum-banner';
     noKeyNotice.style.cssText =
@@ -4131,6 +4269,16 @@
     registerThemedEl(devContactBtn);
     registerThemedEl(bugReportBtn);
 
+    // Permanent entry point for the changelog (also surfaced once per release
+    // via the dismissible "What's new" banner).
+    const whatsNewBtn = document.createElement('button');
+    whatsNewBtn.className = 'vorsum-ctrl-btn';
+    whatsNewBtn.textContent = "What's new";
+    whatsNewBtn.style.cssText = btnStyle + ';width:100%;text-align:center;margin-bottom:6px';
+    whatsNewBtn.addEventListener('click', () => openWhatsNew(getVersion()));
+    troubleshootSection.body.appendChild(whatsNewBtn);
+    registerThemedEl(whatsNewBtn);
+
     troubleshootSection.body.appendChild(debugLabel);
     troubleshootSection.body.appendChild(debugBtn);
     troubleshootSection.body.appendChild(logPanel);
@@ -4460,6 +4608,7 @@
     panel.appendChild(cacheWarningNotice);
     panel.appendChild(rateLimitNotice);
     panel.appendChild(updateNotice);
+    panel.appendChild(whatsNewNotice);
     panel.appendChild(noKeyNotice);
     panel.appendChild(historyPanel);
     panel.appendChild(optionsPanel);
@@ -6708,4 +6857,8 @@
   // Resume any summary that was interrupted (typically a tab closed while its
   // request was in flight). Delayed so it doesn't compete with page load.
   if (!getEmbedVideoId()) setTimeout(resumePendingJobs, 4000);
+
+  // One-time "What's new" banner when the version changed (deferred so it can
+  // respect onboarding / the update notice). Skipped on embeds.
+  if (!getEmbedVideoId()) setTimeout(checkWhatsNew, 3000);
 })();
