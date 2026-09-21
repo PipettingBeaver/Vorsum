@@ -49,5 +49,12 @@
       "The floating dot and the onboarding dot preview are now light/dark theme-reactive.",
       "Fixed the Options/History panel scrollbar so content scrolls inside the panel only when needed."
     ]
+  },
+  {
+    "version": "1.1.2",
+    "highlight": false,
+    "changes": [
+      "Summaries are now properly only saved in local IndexedDB, and deleting any/all History entries now clears the respective 'Saved' status."
+    ]
   }
 ]

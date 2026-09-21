@@ -1088,6 +1088,13 @@
   const STORE = 'summaries';
   let dbPromise = null;
 
+  // In-memory index of History ids (`<mode>_<videoId>`) that currently have a
+  // saved summary. IndexedDB is the single source of truth; this derived Set
+  // exists only so the blue "Saved" tint can be checked synchronously during
+  // button scans. Built from the store's keys at startup and kept in sync on
+  // save/delete/clear + cross-tab broadcasts - never persisted.
+  let savedSummaryIndex = new Set();
+
   function openDb() {
     if (dbPromise) return dbPromise;
     dbPromise = new Promise((resolve, reject) => {
@@ -1163,6 +1170,7 @@
         lastViewedAt: Date.now()
       };
       store.put(record);
+      savedSummaryIndex.add(id); // keep the sync "Saved" tint index in step
       await new Promise((resolve) => {
         tx.oncomplete = resolve;
         tx.onerror = resolve;
@@ -1232,6 +1240,7 @@
     const db = await openDb();
     const tx = db.transaction(STORE, 'readwrite');
     tx.objectStore(STORE).delete(id);
+    savedSummaryIndex.delete(id);
     return new Promise((resolve) => {
       tx.oncomplete = resolve;
       tx.onerror = resolve;
@@ -1242,15 +1251,15 @@
     const db = await openDb();
     const tx = db.transaction(STORE, 'readwrite');
     tx.objectStore(STORE).clear();
+    savedSummaryIndex.clear();
     return new Promise((resolve) => {
       tx.oncomplete = resolve;
       tx.onerror = resolve;
     });
   }
 
-  // Deletes the N oldest entries by createdAt and returns which ones, so
-  // the caller can also clean up the corresponding vorsum_video_cache
-  // entries (keyed by videoId, not by this store's composite id).
+  // Deletes the N oldest entries by createdAt. Returns which ones (videoId +
+  // mode code) for logging; the sync "Saved" index is updated here too.
   async function historyDeleteOldest(n) {
     const db = await openDb();
     return new Promise((resolve) => {
@@ -1265,6 +1274,7 @@
           return;
         }
         deleted.push({ videoId: cursor.value.videoId, mode: cursor.value.mode });
+        savedSummaryIndex.delete(cursor.value.id);
         cursor.delete();
         cursor.continue();
       };
@@ -1403,6 +1413,48 @@
     log(`Migration: imported ${imported} existing summary/summaries into history`);
   }
 
+  // One-time: fold any legacy vorsum_video_cache entries into History (now the
+  // single source of truth), then delete the old key. Runs AFTER
+  // loadSavedSummaryIndex() so entries already in History are skipped.
+  async function migrateVideoCacheToHistory() {
+    if (GM_getValue('vorsum_video_cache_migrated', false)) return;
+    let cache = {};
+    try {
+      cache = GM_getValue('vorsum_video_cache', {}) || {};
+    } catch (e) {
+      cache = {};
+    }
+    let imported = 0;
+    for (const [videoId, entry] of Object.entries(cache)) {
+      const summaries = entry && entry.summaries ? entry.summaries : null;
+      if (!summaries) continue;
+      for (const [mode, val] of Object.entries(summaries)) {
+        const text = typeof val === 'string' ? val : val && val.text;
+        if (!text) continue;
+        if (savedSummaryIndex.has(savedSummaryId(videoId, mode))) continue; // already in History
+        await historyRecordSummary({
+          videoId,
+          mode,
+          title: null, // unrecoverable - falls back to the video id
+          url: `https://www.youtube.com/watch?v=${videoId}`,
+          summary: text,
+          silent: true
+        });
+        imported++;
+      }
+    }
+    try {
+      GM_deleteValue('vorsum_video_cache');
+    } catch (e) {
+      /* best-effort */
+    }
+    GM_setValue('vorsum_video_cache_migrated', true);
+    if (imported) {
+      refreshAllButtonCachedVisuals();
+      log(`Migration: imported ${imported} summary/summaries from the old video cache`);
+    }
+  }
+
   // One-time cleanup, run AFTER the history migration above (which needs to
   // read these same keys first) - deletes every leftover per-video/per-day
   // GM key from the old storage scheme now that everything going forward
@@ -1470,48 +1522,59 @@
     return rec.date === today ? rec.count : 0;
   }
 
-  // Single consolidated GM key instead of one per video+mode
-  // (vorsum_cache_url_377V9A_0ECc, vorsum_cache_transcript_377V9A_0ECc,
-  // vorsum_transcript_377V9A_0ECc, ...), each of which duplicated the
-  // videoId into the key name itself. Holds ONLY the generated summary text
-  // (a few hundred chars each) - see below for why the raw transcript,
-  // which can be up to 20,000 chars, deliberately does NOT live here.
-  function getVideoCache() {
-    return GM_getValue('vorsum_video_cache', {});
-  }
-  function getCachedSummary(videoId, mode) {
-    const entry = getVideoCache()[videoId]?.summaries?.[mode];
-    // Backward-compat: entries cached before this field existed are a plain
-    // string rather than {text, cachedAt} - both read out fine here.
-    return (typeof entry === 'string' ? entry : entry?.text) || '';
-  }
-  function getCachedSummaryCachedAt(videoId, mode) {
-    const entry = getVideoCache()[videoId]?.summaries?.[mode];
-    return typeof entry === 'object' && entry ? entry.cachedAt || null : null;
+  // ---- Saved-summary access (IndexedDB is the single source of truth) ----
+  // Summaries live ONLY in the History store now; there is no separate
+  // vorsum_video_cache blob to keep in sync. hasCachedSummary() stays
+  // synchronous for the button tint by consulting the derived in-memory index
+  // above, while getCachedSummary() reads the actual text from IndexedDB.
+  function savedSummaryId(videoId, mode) {
+    return `${mode}_${videoId}`;
   }
   function hasCachedSummary(videoId, mode) {
-    return !!getCachedSummary(videoId, mode);
+    return savedSummaryIndex.has(savedSummaryId(videoId, mode));
   }
-  function setCachedSummary(videoId, mode, text) {
-    const cache = getVideoCache();
-    if (!cache[videoId]) cache[videoId] = {};
-    if (!cache[videoId].summaries) cache[videoId].summaries = {};
-    cache[videoId].summaries[mode] = { text, cachedAt: Date.now() };
-    GM_setValue('vorsum_video_cache', cache);
+  async function getCachedSummary(videoId, mode) {
+    const id = savedSummaryId(videoId, mode);
+    try {
+      const db = await openDb();
+      const rec = await new Promise((resolve) => {
+        const tx = db.transaction(STORE, 'readonly');
+        const r = tx.objectStore(STORE).get(id);
+        r.onsuccess = () => resolve(r.result || null);
+        r.onerror = () => resolve(null);
+      });
+      return (rec && rec.summary) || '';
+    } catch (e) {
+      return '';
+    }
+  }
+  // Populates the sync index from the store's keys and re-tints any buttons
+  // that were injected before it finished loading.
+  async function loadSavedSummaryIndex() {
+    try {
+      const db = await openDb();
+      const keys = await new Promise((resolve, reject) => {
+        const tx = db.transaction(STORE, 'readonly');
+        const req = tx.objectStore(STORE).getAllKeys();
+        req.onsuccess = () => resolve(req.result || []);
+        req.onerror = () => reject(req.error);
+      });
+      savedSummaryIndex = new Set(keys.map(String));
+      refreshAllButtonCachedVisuals();
+    } catch (e) {
+      log(`Saved-summary index: failed to load from History: ${e.message}`, 'warn');
+    }
   }
 
-  // Raw scraped transcripts are intentionally NOT persisted to GM storage.
-  // They can run up to MAX_TRANSCRIPT_CHARS (20,000) each, versus a summary
-  // at maybe a few hundred - persisting them at scale (a few hundred
-  // videos) would turn vorsum_video_cache into a multi-megabyte blob that
-  // gets fully re-serialized and rewritten on every single write, which is
-  // exactly the "one big JSON blob" cost we specifically avoided for
-  // History by using IndexedDB instead. A transcript is only ever useful
-  // again within the same click-to-retry chain (a failed summarize attempt
-  // retrying moments later) - once a summary exists, the cache-hit check
-  // above short-circuits before the transcript is ever touched again. A
-  // plain in-memory Map covers that need without persisting anything to
-  // disk: gone on page reload, and never grows the on-disk cache at all.
+  // Raw scraped transcripts are intentionally NOT persisted. They can run up
+  // to MAX_TRANSCRIPT_CHARS (20,000) each, versus a summary at maybe a few
+  // hundred - persisting them at scale (a few hundred videos) would bloat
+  // IndexedDB for no real benefit. A transcript is only ever useful again
+  // within the same click-to-retry chain (a failed summarize attempt retrying
+  // moments later) - once a summary exists, the cache-hit check above
+  // short-circuits before the transcript is ever touched again. A plain
+  // in-memory Map covers that need without persisting anything to disk: gone
+  // on page reload, and never grows the on-disk store at all.
   const transcriptSessionCache = new Map();
   function getCachedTranscript(videoId) {
     return transcriptSessionCache.get(videoId) || '';
@@ -1530,10 +1593,6 @@
   // units) - close enough for a display estimate, not meant to be exact to
   // the byte the storage backend actually uses on disk.
   async function getCacheSizeInfo() {
-    const videoCache = getVideoCache();
-    const videoCacheCount = Object.keys(videoCache).length;
-    const videoCacheBytes = new Blob([JSON.stringify(videoCache)]).size;
-
     let historyEntries = [];
     try {
       historyEntries = await historyGetAll();
@@ -1543,11 +1602,9 @@
     const historyBytes = historyEntries.reduce((sum, e) => sum + new Blob([JSON.stringify(e)]).size, 0);
 
     return {
-      videoCacheCount,
-      videoCacheBytes,
       historyCount: historyEntries.length,
       historyBytes,
-      totalBytes: videoCacheBytes + historyBytes,
+      totalBytes: historyBytes,
       entries: historyEntries
     };
   }
@@ -2286,6 +2343,10 @@
     historyChannel.onmessage = (event) => {
       if (event?.data?.type === 'new-entry') {
         log('History: new-entry notice received from another tab');
+        // Keep this tab's sync "Saved" index in step with the other tab.
+        const { videoId, mode } = event.data;
+        if (videoId && mode) savedSummaryIndex.add(savedSummaryId(videoId, mode));
+        else loadSavedSummaryIndex();
         notifyNewHistoryEntry(true);
       }
     };
@@ -2293,12 +2354,12 @@
     log('BroadcastChannel unavailable - History notice will only work within this tab', 'warn');
   }
 
-  function notifyNewHistoryEntry(fromRemote = false) {
+  function notifyNewHistoryEntry(fromRemote = false, info = null) {
     pendingNewHistoryCount++;
     renderHistoryNotice();
     if (!fromRemote && historyChannel) {
       try {
-        historyChannel.postMessage({ type: 'new-entry' });
+        historyChannel.postMessage({ type: 'new-entry', videoId: info?.videoId, mode: info?.mode });
       } catch (e) {
         log(`BroadcastChannel postMessage failed: ${e.message}`, 'warn');
       }
@@ -2370,7 +2431,7 @@
     for (const job of jobs) {
       // If it actually completed before the tab died (result landed but the
       // clear didn't), don't redo the work.
-      if (getCachedSummary(job.videoId, job.mode)) {
+      if (await getCachedSummary(job.videoId, job.mode)) {
         clearPendingJob(job.videoId, job.mode);
         continue;
       }
@@ -2514,7 +2575,7 @@
       );
       addModalParagraph(
         body,
-        'Generated summaries are cached in two places: a lightweight local key/value store (just the summary text itself, a few hundred characters each) so re-clicking Summarize on a video you already summarized is instant, and a searchable History log in your browser\'s IndexedDB, which also holds the title, channel, and timestamp for each one.'
+        'Generated summaries are cached locally in your browser\'s IndexedDB (a searchable History log that also holds the title, channel, and timestamp for each one), so re-clicking Summarize on a video you already summarized is instant.'
       );
       addModalParagraph(
         body,
@@ -2534,7 +2595,7 @@
       const sizeLine = addModalParagraph(body, 'Loading cache size...');
       try {
         const info = await getCacheSizeInfo();
-        sizeLine.textContent = `Currently storing ${info.historyCount} summar${info.historyCount === 1 ? 'y' : 'ies'} in History (${formatBytes(info.totalBytes)} total, across the summary cache and History combined).`;
+        sizeLine.textContent = `Currently storing ${info.historyCount} summar${info.historyCount === 1 ? 'y' : 'ies'} in History (${formatBytes(info.totalBytes)} total).`;
       } catch (e) {
         sizeLine.textContent = 'Could not read cache size right now - see Debugging log.';
       }
@@ -2601,6 +2662,7 @@
       clearHistoryBtn.addEventListener('click', async () => {
         if (!confirm('Delete all vorsum summary history? This cannot be undone.')) return;
         await historyClearAll();
+        refreshAllButtonCachedVisuals();
         if (historyListEl) historyListEl.replaceChildren();
         log('History: cleared all entries', 'warn');
         loadHistoryRef?.(true); // refresh an open History list, if there is one
@@ -3038,14 +3100,7 @@
     clearOldestBtn.style.cssText = exportBtn.style.cssText;
     clearOldestBtn.addEventListener('click', async () => {
       const deleted = await historyDeleteOldest(50);
-      const cache = getVideoCache();
-      deleted.forEach(({ videoId, mode }) => {
-        if (cache[videoId]?.summaries) {
-          delete cache[videoId].summaries[codeToModeKey(mode)];
-          if (Object.keys(cache[videoId].summaries).length === 0) delete cache[videoId];
-        }
-      });
-      GM_setValue('vorsum_video_cache', cache);
+      refreshAllButtonCachedVisuals(); // History is the source of truth; index already updated
       log(`Cache: cleared ${deleted.length} oldest history entries`);
       cacheWarningNoticeEl.style.display = 'none';
       if (historyPanelOpen) loadHistoryRef?.(true);
@@ -4403,6 +4458,7 @@
         }
         clearTimeout(deleteArmTimeout);
         await historyDelete(entry.id);
+        refreshAllButtonCachedVisuals();
         row.remove();
         log(`History: deleted entry ${entry.id}`);
       });
@@ -5969,6 +6025,7 @@
     btn.id = 'vorsum-embed-btn';
     btn.type = 'button';
     btn.className = 'vorsum-btn';
+    btn.dataset.vorsumVideoId = videoId; // so refreshAllButtonCachedVisuals() keeps its tint in sync
     btn.textContent = '\u2211';
     btn.setAttribute('aria-label', 'Summarize');
     btn.title = 'Summarize with Vorsum';
@@ -6488,7 +6545,7 @@
 
   async function handleClick(videoId, card, btn, attempt = 1, modeOverride = null) {
     const mode = modeOverride || getMode();
-    const cached = getCachedSummary(videoId, mode);
+    const cached = await getCachedSummary(videoId, mode);
     const watchUrl = `https://www.youtube.com/watch?v=${videoId}`;
     const cardTitle = extractVideoTitle(card);
     const channelInfo = extractChannelInfo(card);
@@ -6730,7 +6787,9 @@
         }
 
         log(`Summary received (${text.length} chars), caching`);
-        setCachedSummary(videoId, mode, text);
+        // History (written below) is the source of truth; keep the sync tint
+        // index in step immediately so the button reflects "saved" right away.
+        savedSummaryIndex.add(savedSummaryId(videoId, mode));
         clearPendingJob(videoId, mode);
         bumpUsageCount();
         refreshButtonCachedVisual(btn, videoId);
@@ -6751,7 +6810,7 @@
           setButtonState(btn, 'Hide summary', false);
         } else {
           setButtonState(btn, 'Summarize', false);
-          notifyNewHistoryEntry();
+          notifyNewHistoryEntry(false, { videoId, mode });
           log('Summary ready but the button is off-screen - notifying instead of auto-showing', 'info');
         }
 
@@ -6842,6 +6901,9 @@
   ensureWidget(); // no-op on embed players - they get the compact ∑ button via scanForCards()
   scanForCards();
   runMigrationIfNeeded().then(() => cleanupLegacyStorage());
+  // History (IndexedDB) is the single source of truth for summaries; load the
+  // sync "Saved" tint index from it, then fold in any legacy video-cache rows.
+  loadSavedSummaryIndex().then(() => migrateVideoCacheToHistory());
   checkCacheThreshold(); // in case the cache was already over threshold from a prior session
   checkForUpdate(); // throttled internally to once/day, harmless to call every load
 
