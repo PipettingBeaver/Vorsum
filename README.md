@@ -6,17 +6,13 @@ My utility uses free Gemini and YouTube API to make calls for videos for URL-bas
 <table>
   <tr>
     <td align="center">
-      <img width="400" alt="Base YouTube layout on light mode" src="https://github.com/user-attachments/assets/1282f41d-8a3d-4321-b5e5-ae6254a9ca69" />
+      <img width="400" alt="Base YouTube layout on light mode" src="https://github.com/user-attachments/assets/e2e3809f-2965-44c3-b19d-36ef26c4f60a" />
       <br />
-      <sub><b>Light Mode (Base YouTube)</b></sub>
-    </td>
-    <td align="center">
-      <img width="400" alt="Vorapis UI layout on dark mode" src="https://github.com/user-attachments/assets/b234ec7e-30cd-4be0-9b1b-dc8098ee79d8" />
-      <br />
-      <sub><b>Dark Mode (Vorapis UI)</b></sub>
+      <sub><b>Works with Light & Dark Mode</b></sub>
     </td>
   </tr>
 </table>
+
 
 # Installation as Userscript via UserScript Manager
 1. Download ViolentMonkey for [Chrome](<https://chromewebstore.google.com/detail/violentmonkey/jinjaccalgkegednnccohejagnlnfdag>) or [Firefox](<https://addons.mozilla.org/en-US/firefox/addon/violentmonkey/>).
