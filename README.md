@@ -3,7 +3,6 @@
 Vorsum is a summarizer for YouTube that I made since I couldn't find any sleek in-line YouTube summarizers that were quite what I wanted.
 My utility uses free Gemini and YouTube API to make calls for videos for URL-based parsing or captions respectively, and has a built-in tutorial for beginners.
 
-Vorsum with Light and Dark Mode:
 <table>
   <tr>
     <td align="center">
@@ -18,12 +17,12 @@ Vorsum with Light and Dark Mode:
     </td>
   </tr>
 </table>
+Vorsum with Light and Dark Mode:
 
-# Installation as Userscript
-1. Download violentmonkey for [chrome](<https://chromewebstore.google.com/detail/violentmonkey/jinjaccalgkegednnccohejagnlnfdag>) or [firefox](<https://addons.mozilla.org/en-US/firefox/addon/violentmonkey/>)
-2. Click [here](https://github.com/PipettingBeaver/Vorsum/blob/main/Vorsum.user.js) to install Vorsum as a Userscript.
+# Installation as Userscript via UserScript Manager
+1. Download ViolentMonkey for [Chrome](<https://chromewebstore.google.com/detail/violentmonkey/jinjaccalgkegednnccohejagnlnfdag>) or [Firefox](<https://addons.mozilla.org/en-US/firefox/addon/violentmonkey/>).
+2. Click [here](https://github.com/PipettingBeaver/Vorsum/blob/main/Vorsum.user.js) to one-click install Vorsum as a Userscript.
 3. First time user setup happens when you visit YouTube.
-
 
 Vorapis UI, mentioned above, is not affiliated with my project, even though I've made my work compatible. You can get it here: [https://vorapis.pages.dev/](https://vorapis.pages.dev/)
 
