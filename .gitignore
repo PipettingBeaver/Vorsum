@@ -26,6 +26,9 @@ $RECYCLE.BIN/
 *.sublime-project
 *.code-workspace
 
+# ---- AI tooling (local-only) ----
+.continue/
+
 # ---- Backups / temp / logs ----
 *.bak
 *.tmp
@@ -34,6 +37,7 @@ $RECYCLE.BIN/
 
 # ---- Local-only docs ----
 CLAUDE.md
+AGENTS.md
 
 # ---- Secrets ----
 # API keys live in the userscript manager's storage, never in the repo.
