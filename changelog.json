@@ -56,5 +56,20 @@
     "changes": [
       "Summaries are now properly only saved in local IndexedDB, and deleting any/all History entries now clears the respective 'Saved' status."
     ]
+  },
+  {
+    "version": "1.1.3",
+    "highlight": false,
+    "changes": [
+      "Fixed History entries sometimes saving the video ID instead of the title on modern card layouts; compacted the History row buttons to ∑ / X."
+    ]
+  },
+  {
+    "version": "1.1.4",
+    "highlight": false,
+    "changes": [
+      "The 'Show transcript download T' option now toggles live without a page reload.",
+      "Added a Change log button in Options and widened the Data & Privacy popup."
+    ]
   }
 ]

@@ -2,7 +2,7 @@
 // @name         Vorsum - Youtube Summary Button
 // @namespace    https://github.com/PipettingBeaver/Vorsum
 // @icon         https://s.ytimg.com/yts/img/favicon_32-vflWoMFGx.png
-// @version      1.1.2
+// @version      1.1.4
 // @description  Adds a click-to-summarize button to YouTube grid cards. Two modes: caption-transcript or direct-URL (Gemini watches the video itself). Beginner friendly and includes a tutorial.
 // @match        https://www.youtube.com/*
 // @grant        GM_xmlhttpRequest
@@ -564,6 +564,47 @@
       link.style.cssText = 'text-decoration:underline';
       registerThemedEl(link);
       body.appendChild(link);
+    });
+  }
+
+  // Full history, newest first, in a wider modal.
+  function openFullChangelog() {
+    fetchChangelog(true).then((data) => {
+      const entries = Array.isArray(data) ? data.slice().reverse() : [];
+      showSimpleModal(
+        'Change log',
+        (body) => {
+          if (!entries.length) {
+            addModalParagraph(body, 'No changelog available right now (offline or not published yet).');
+          } else {
+            entries.forEach((entry) => {
+              const h = document.createElement('div');
+              h.textContent = `v${entry.version}`;
+              h.style.cssText = 'font-weight:bold;margin:12px 0 4px';
+              body.appendChild(h);
+              const ul = document.createElement('ul');
+              ul.style.cssText = 'margin:0;padding-left:18px';
+              (entry.changes || []).forEach((c) => {
+                const li = document.createElement('li');
+                li.textContent = c;
+                li.style.cssText = 'margin-bottom:4px;font-size:12px';
+                ul.appendChild(li);
+              });
+              body.appendChild(ul);
+            });
+          }
+          const link = document.createElement('a');
+          link.href = CHANGELOG_RAW_URL;
+          link.target = '_blank';
+          link.rel = 'noopener noreferrer';
+          link.textContent = 'Open changelog.json';
+          link.className = 'vorsum-history-title';
+          link.style.cssText = 'text-decoration:underline;display:inline-block;margin-top:10px';
+          registerThemedEl(link);
+          body.appendChild(link);
+        },
+        { maxWidth: 620, maxHeight: '85vh' }
+      );
     });
   }
 
@@ -2255,6 +2296,19 @@
     if (!text && isWatchPage) {
       text = document.title.replace(/\s*[-–—]\s*YouTube\s*$/i, '').trim();
     }
+    // Card fallback: in some layouts (notably the modern "lockup view model")
+    // the first watch link in DOM order is the thumbnail, which has no text -
+    // so the selectors above yield an empty string and History would fall back
+    // to the raw video id. Pick the watch link that actually carries text.
+    if (!text && !isWatchPage) {
+      for (const a of card.querySelectorAll('a[href*="watch?v="]')) {
+        const t = (a.textContent || a.getAttribute('title') || a.getAttribute('aria-label') || '').trim();
+        if (t && !/^\d{1,2}:\d{2}/.test(t)) {
+          text = t;
+          break;
+        }
+      }
+    }
     return text || null;
   }
 
@@ -2473,7 +2527,7 @@
   // one guards against stacking (one flag, shared across callers) but is
   // otherwise a plain "title + body + Close" shell either caller fills in.
   let anySimpleModalOpen = false;
-  function showSimpleModal(title, fillBody) {
+  function showSimpleModal(title, fillBody, opts = {}) {
     if (anySimpleModalOpen) return;
     anySimpleModalOpen = true;
 
@@ -2485,7 +2539,8 @@
     const modal = document.createElement('div');
     modal.className = 'vorsum-modal';
     modal.style.cssText =
-      'max-width:440px;width:100%;max-height:80vh;overflow-y:auto;border-width:1px;border-style:solid;border-radius:6px;padding:16px;font-family:sans-serif;font-size:13px;line-height:1.5;box-shadow:0 4px 20px rgba(0,0,0,0.35)';
+      `max-width:${opts.maxWidth || 440}px;width:100%;max-height:${opts.maxHeight || '80vh'};overflow-y:auto;` +
+      'border-width:1px;border-style:solid;border-radius:6px;padding:16px;font-family:sans-serif;font-size:13px;line-height:1.5;box-shadow:0 4px 20px rgba(0,0,0,0.35)';
 
     const heading = document.createElement('h2');
     heading.textContent = title;
@@ -2599,7 +2654,7 @@
       } catch (e) {
         sizeLine.textContent = 'Could not read cache size right now - see Debugging log.';
       }
-    });
+    }, { maxWidth: 760, maxHeight: '88vh' });
   }
 
   function showHistoryStatsModal() {
@@ -3998,8 +4053,8 @@
     transcriptButtonCheckbox.addEventListener('change', () => {
       setTranscriptButtonEnabled(transcriptButtonCheckbox.checked);
       log(`Show transcript download button: ${transcriptButtonCheckbox.checked}`);
-      // Trigger a rescan to add/remove transcript buttons from all cards
-      scanForCards();
+      // Add/remove the T button on existing cards immediately (no reload).
+      refreshTranscriptButtons();
     });
     const transcriptButtonText = document.createElement('span');
     // Small outlined glyph badges so the "T" and "\u2211" read as the actual
@@ -4324,15 +4379,25 @@
     registerThemedEl(devContactBtn);
     registerThemedEl(bugReportBtn);
 
-    // Permanent entry point for the changelog (also surfaced once per release
-    // via the dismissible "What's new" banner).
+    // Permanent entry points for the changelog (the "What's new" banner also
+    // surfaces the current version once per release).
+    const changelogRow = document.createElement('div');
+    changelogRow.style.cssText = 'display:flex;gap:4px;margin-bottom:6px';
     const whatsNewBtn = document.createElement('button');
     whatsNewBtn.className = 'vorsum-ctrl-btn';
     whatsNewBtn.textContent = "What's new";
-    whatsNewBtn.style.cssText = btnStyle + ';width:100%;text-align:center;margin-bottom:6px';
+    whatsNewBtn.style.cssText = btnStyle + ';flex:1;text-align:center';
     whatsNewBtn.addEventListener('click', () => openWhatsNew(getVersion()));
-    troubleshootSection.body.appendChild(whatsNewBtn);
+    const changelogBtn = document.createElement('button');
+    changelogBtn.className = 'vorsum-ctrl-btn';
+    changelogBtn.textContent = 'Change log';
+    changelogBtn.style.cssText = btnStyle + ';flex:1;text-align:center';
+    changelogBtn.addEventListener('click', openFullChangelog);
+    changelogRow.appendChild(whatsNewBtn);
+    changelogRow.appendChild(changelogBtn);
+    troubleshootSection.body.appendChild(changelogRow);
     registerThemedEl(whatsNewBtn);
+    registerThemedEl(changelogBtn);
 
     troubleshootSection.body.appendChild(debugLabel);
     troubleshootSection.body.appendChild(debugBtn);
@@ -4426,34 +4491,37 @@
 
       const viewBtn = document.createElement('button');
       viewBtn.className = 'vorsum-ctrl-btn vorsum-history-view-btn';
-      viewBtn.textContent = 'View summary';
-      viewBtn.style.cssText = btnStyle + ';font-size:10px !important;padding:1px 4px';
+      viewBtn.textContent = '\u2211';
+      viewBtn.title = 'View summary';
+      viewBtn.style.cssText = btnStyle + ';font-size:11px !important;padding:1px 4px;min-width:22px;text-align:center';
       viewBtn.addEventListener('click', () => {
         const showing = summaryEl.style.display !== 'none';
         summaryEl.style.display = showing ? 'none' : 'block';
-        viewBtn.textContent = showing ? 'View summary' : 'Hide summary';
+        viewBtn.title = showing ? 'View summary' : 'Hide summary';
       });
 
       const delBtn = document.createElement('button');
       delBtn.className = 'vorsum-ctrl-btn vorsum-danger-btn';
-      delBtn.textContent = 'Delete';
-      delBtn.style.cssText = btnStyle + ';font-size:10px !important;padding:1px 4px';
+      delBtn.textContent = '\u00d7';
+      delBtn.title = 'Delete';
+      delBtn.style.cssText = btnStyle + ';font-size:11px !important;padding:1px 4px;min-width:22px;text-align:center';
 
-      // Click-to-arm confirm instead of a modifier-key gesture: the button
-      // itself tells you what a second click will do, no hidden shortcut to
-      // discover or document. Times out back to "Delete" if not confirmed.
+      // Click-to-arm confirm instead of a modifier-key gesture: a first click
+      // fills the X red, a second deletes. Times out back to the plain red X.
       let deleteArmed = false;
       let deleteArmTimeout = null;
+      function disarmDelete() {
+        deleteArmed = false;
+        delBtn.title = 'Delete';
+        applyThemeToElement(delBtn); // restore the themed (danger-red text) colors
+      }
       delBtn.addEventListener('click', async () => {
         if (!deleteArmed) {
           deleteArmed = true;
-          delBtn.textContent = 'Confirm?';
           delBtn.title = 'Click again to permanently delete this entry';
-          deleteArmTimeout = setTimeout(() => {
-            deleteArmed = false;
-            delBtn.textContent = 'Delete';
-            delBtn.title = '';
-          }, 3000);
+          delBtn.style.setProperty('background', '#c0392b', 'important');
+          delBtn.style.setProperty('color', '#ffffff', 'important');
+          deleteArmTimeout = setTimeout(disarmDelete, 3000);
           return;
         }
         clearTimeout(deleteArmTimeout);
@@ -4467,10 +4535,10 @@
       actionsRow.appendChild(delBtn);
 
       // Buttons before the summary text (not after): with them below,
-      // expanding the summary pushed "Hide summary"/"Delete" further down
-      // the page, so reading it then closing it meant extra mouse travel
-      // and often scrolling. Keeping the buttons in a fixed spot right
-      // under the title means the summary just grows underneath them.
+      // expanding the summary pushed the ∑/× buttons further down the page, so
+      // reading it then closing it meant extra mouse travel and often
+      // scrolling. Keeping them in a fixed spot right under the title means
+      // the summary just grows underneath them.
       col.appendChild(titleEl);
       col.appendChild(meta);
       col.appendChild(actionsRow);
@@ -6118,6 +6186,69 @@
     });
   }
 
+  // Creates the "T" (download transcript) button and appends it to a grid
+  // card's button container. Kept separate so it can be added/removed live
+  // when the Options toggle changes, without a page reload.
+  function addTranscriptButton(container, card, videoId) {
+    const transcriptBtn = document.createElement('button');
+    transcriptBtn.className = 'vorsum-btn vorsum-transcript-btn';
+    transcriptBtn.dataset.vorsumVideoId = videoId;
+    transcriptBtn.textContent = 'T';
+    transcriptBtn.setAttribute('aria-label', 'Download transcript');
+    transcriptBtn.style.cssText = [
+      'padding:2px 8px',
+      'font-size:11px !important',
+      'border-width:1px',
+      'border-style:solid',
+      'border-radius:3px',
+      'cursor:pointer'
+    ].join(';');
+    transcriptBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      handleTranscriptDownload(videoId, card, transcriptBtn);
+    });
+    container.appendChild(transcriptBtn);
+    registerThemedEl(transcriptBtn);
+
+    // Share hover state with the card, same as the Σ button.
+    transcriptBtn.dataset.vorsumHovered = 'false';
+    card.addEventListener('mouseenter', () => {
+      transcriptBtn.dataset.vorsumHovered = 'true';
+      applyBtnHoverVisibility(transcriptBtn);
+    });
+    card.addEventListener('mouseleave', () => {
+      transcriptBtn.dataset.vorsumHovered = 'false';
+      applyBtnHoverVisibility(transcriptBtn);
+    });
+    transcriptBtn.addEventListener('focus', () => {
+      transcriptBtn.dataset.vorsumHovered = 'true';
+      applyBtnHoverVisibility(transcriptBtn);
+    });
+    transcriptBtn.addEventListener('blur', () => {
+      transcriptBtn.dataset.vorsumHovered = 'false';
+      applyBtnHoverVisibility(transcriptBtn);
+    });
+    applyBtnHoverVisibility(transcriptBtn);
+    return transcriptBtn;
+  }
+
+  // Adds or removes the "T" button on every already-injected grid card to
+  // match the current setting, so the Options toggle takes effect live.
+  function refreshTranscriptButtons() {
+    document.querySelectorAll('.vorsum-btn-container').forEach((container) => {
+      const sigma = container.querySelector('.vorsum-btn');
+      const videoId = sigma && sigma.dataset.vorsumVideoId;
+      if (!videoId) return;
+      const existing = container.querySelector('.vorsum-transcript-btn');
+      if (getTranscriptButtonEnabled()) {
+        if (!existing) addTranscriptButton(container, container.closest(CARD_SELECTOR) || container.parentElement, videoId);
+      } else if (existing) {
+        existing.remove();
+      }
+    });
+  }
+
   function injectButton(card) {
     if (card.querySelector('.vorsum-btn')) return;
 
@@ -6128,6 +6259,7 @@
 
     // Container for both buttons (side-by-side)
     const btnContainer = document.createElement('div');
+    btnContainer.className = 'vorsum-btn-container';
     btnContainer.style.cssText = 'display:flex;gap:4px;margin-top:4px';
 
     // Summarize button (\u03a3)
@@ -6155,51 +6287,8 @@
     registerThemedEl(btn);
     refreshButtonCachedVisual(btn, videoId);
 
-    // Transcript download button (T) - only if enabled
-    if (getTranscriptButtonEnabled()) {
-      const transcriptBtn = document.createElement('button');
-      transcriptBtn.className = 'vorsum-btn vorsum-transcript-btn';
-      transcriptBtn.dataset.vorsumVideoId = videoId;
-      transcriptBtn.textContent = 'T';
-      transcriptBtn.setAttribute('aria-label', 'Download transcript');
-      transcriptBtn.style.cssText = [
-        'padding:2px 8px',
-        'font-size:11px !important',
-        'border-width:1px',
-        'border-style:solid',
-        'border-radius:3px',
-        'cursor:pointer'
-      ].join(';');
-
-      transcriptBtn.addEventListener('click', (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        handleTranscriptDownload(videoId, card, transcriptBtn);
-      });
-
-      btnContainer.appendChild(transcriptBtn);
-      registerThemedEl(transcriptBtn);
-
-      // Share hover state with the transcript button
-      transcriptBtn.dataset.vorsumHovered = 'false';
-      card.addEventListener('mouseenter', () => {
-        transcriptBtn.dataset.vorsumHovered = 'true';
-        applyBtnHoverVisibility(transcriptBtn);
-      });
-      card.addEventListener('mouseleave', () => {
-        transcriptBtn.dataset.vorsumHovered = 'false';
-        applyBtnHoverVisibility(transcriptBtn);
-      });
-      transcriptBtn.addEventListener('focus', () => {
-        transcriptBtn.dataset.vorsumHovered = 'true';
-        applyBtnHoverVisibility(transcriptBtn);
-      });
-      transcriptBtn.addEventListener('blur', () => {
-        transcriptBtn.dataset.vorsumHovered = 'false';
-        applyBtnHoverVisibility(transcriptBtn);
-      });
-      applyBtnHoverVisibility(transcriptBtn);
-    }
+    // Transcript download button (T) - only if enabled.
+    if (getTranscriptButtonEnabled()) addTranscriptButton(btnContainer, card, videoId);
 
     contentArea.appendChild(btnContainer);
 
