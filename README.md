@@ -20,43 +20,10 @@ Here are examples showing the base YouTube layout on light mode alongside compat
   </tr>
 </table>
 
-# Installation as Userscript (Takes less than 2 minutes)
-All you need is ViolentMonkey or an equivalent Userscript Manager, paste in the URL for this open-source userscript, and you're good to go.
-1. Depending on what browser you prefer to use, ViolentMonkey can be found below:
-   
-a. [https://addons.mozilla.org/en-US/firefox/addon/violentmonkey/](https://addons.mozilla.org/en-US/firefox/addon/violentmonkey/)
-
-b. [https://chromewebstore.google.com/detail/violentmonkey/jinjaccalgkegednnccohejagnlnfdag](https://chromewebstore.google.com/detail/violentmonkey/jinjaccalgkegednnccohejagnlnfdag)
-
-2. After installation, open the extension and click the gear symbol (⚙) in the menu. This goes to the Userscripts page.
-<img width="330" height="217" alt="RdBUQPzZ5h" src="https://github.com/user-attachments/assets/d53c5212-2249-4060-b184-bf5b23d5f9ca" />
-
-3. Navigate to the top left of this page and click "New" and then "New from URL".
-<img width="443" height="357" alt="firefox_MDecftEzOp" src="https://github.com/user-attachments/assets/f0221cea-246f-4338-a588-34c9102fdf0a" />
-
-Copy and paste the vorsum userscript URL below, hosted on this github repo:
-
-```js
-https://github.com/PipettingBeaver/Vorsum/raw/refs/heads/main/Vorsum.user.js
-```
-
-4. There is a quick onboarding for first-time initialization for getting set up, or you can follow the beginner setup guide included below.
-
-# Quick user setup guide 
-First-time user onboarding is included in Vorsum when Youtube is visited.
-An additional guide is included below for (free-tier Gemini) API key access setup:
-
-a. Make sure you're logged in to your Google account and navigate to [https://aistudio.google.com/api-keys](https://aistudio.google.com/api-keys).
-
-b. Click "Create API Key" and copy the unique code generated. Navigate back to YouTube.
-
-c. Navigate to the top left and expand the Options menu:
-
-<img width="319" height="319" alt="image" src="https://github.com/user-attachments/assets/15e5b841-c54d-4254-bcd4-4543b50c4f7e" />
-
-d. Make sure Gemini is selected.
-
-e. Paste your API key from earlier.
+# Installation as Userscript
+1. Download violentmonkey for [chrome](<https://chromewebstore.google.com/detail/violentmonkey/jinjaccalgkegednnccohejagnlnfdag>) or [firefox](<https://addons.mozilla.org/en-US/firefox/addon/violentmonkey/>)
+2. Click [here](https://github.com/PipettingBeaver/Vorsum/blob/main/Vorsum.user.js) to install Vorsum as a Userscript.
+3. First time user setup happens when you visit YouTube.
 
 
 Vorapis UI, mentioned above, is not affiliated with my project, even though I've made my work compatible. You can get it here: [https://vorapis.pages.dev/](https://vorapis.pages.dev/)
