@@ -12,6 +12,7 @@ My utility uses free Gemini and YouTube API to make calls for videos for URL-bas
     </td>
   </tr>
 </table>
+
 # Installation as Userscript via UserScript Manager
 1. Download ViolentMonkey for [Chrome](<https://chromewebstore.google.com/detail/violentmonkey/jinjaccalgkegednnccohejagnlnfdag>) or [Firefox](<https://addons.mozilla.org/en-US/firefox/addon/violentmonkey/>).
 2. Click [here](https://github.com/PipettingBeaver/Vorsum/blob/main/Vorsum.user.js) to one-click install Vorsum as a Userscript.
