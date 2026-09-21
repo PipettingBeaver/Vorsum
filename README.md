@@ -3,12 +3,11 @@
 Vorsum is a summarizer for YouTube that I made since I couldn't find any sleek in-line YouTube summarizers that were quite what I wanted.
 My utility uses free Gemini and YouTube API to make calls for videos for URL-based parsing or captions respectively, and has a built-in tutorial for beginners.
 
-Here are examples showing the base YouTube layout on light mode alongside compatibility with the Vorapis UI layout on dark mode:
-
+Vorsum with Light and Dark Mode:
 <table>
   <tr>
     <td align="center">
-      <img width="400" alt="Base YouTube layout on light mode" src="https://github.com/user-attachments/assets/1150f3b2-32a2-417c-ab58-a0b1adbfd2a4" />
+      <img width="400" alt="Base YouTube layout on light mode" src="https://github.com/user-attachments/assets/1282f41d-8a3d-4321-b5e5-ae6254a9ca69" />
       <br />
       <sub><b>Light Mode (Base YouTube)</b></sub>
     </td>
