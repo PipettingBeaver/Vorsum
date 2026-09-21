@@ -1,4 +1,3 @@
-<img width="1199" height="1452" alt="Screenshot_20260921_014050" src="https://github.com/user-attachments/assets/933a11d1-5b0f-4a96-965e-a7cc6ca45e8d" />
 # Vorsum - ∑ YouTube summary userscript
 
 Vorsum is a summarizer for YouTube that I made since I couldn't find any sleek in-line YouTube summarizers that were quite what I wanted.
