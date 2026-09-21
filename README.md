@@ -17,7 +17,6 @@ My utility uses free Gemini and YouTube API to make calls for videos for URL-bas
     </td>
   </tr>
 </table>
-Vorsum with Light and Dark Mode:
 
 # Installation as Userscript via UserScript Manager
 1. Download ViolentMonkey for [Chrome](<https://chromewebstore.google.com/detail/violentmonkey/jinjaccalgkegednnccohejagnlnfdag>) or [Firefox](<https://addons.mozilla.org/en-US/firefox/addon/violentmonkey/>).
