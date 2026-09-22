@@ -2,7 +2,7 @@
 // @name         Vorsum - Youtube Summary Button
 // @namespace    https://github.com/PipettingBeaver/Vorsum
 // @icon         https://s.ytimg.com/yts/img/favicon_32-vflWoMFGx.png
-// @version      1.1.5
+// @version      1.1.6
 // @description  Adds a click-to-summarize button to YouTube grid cards. Two modes: caption-transcript or direct-URL (Gemini watches the video itself). Beginner friendly and includes a tutorial.
 // @match        https://www.youtube.com/*
 // @grant        GM_xmlhttpRequest
@@ -482,14 +482,34 @@
   }
 
   // ---- Changelog / "What's new" ----
-  // changelog.json lives on the repo; fetched lazily (only when the version
-  // changed and the cache is stale, or on demand) and cached in GM storage -
-  // never bundled, never on a fixed interval.
-  const CHANGELOG_RAW_URL = 'https://raw.githubusercontent.com/PipettingBeaver/Vorsum/refs/heads/main/changelog.json';
+  // CHANGELOG.md lives on the repo (readable on GitHub) and is also the app's
+  // data source; fetched lazily (only when the version changed and the cache
+  // is stale, or on demand) and cached in GM storage - never bundled, never on
+  // a fixed interval. Format (kept strict so parsing stays reliable):
+  //   ## <version> - <YYYY-MM-DD> [(highlight)]
+  //   - change
+  const CHANGELOG_RAW_URL = 'https://raw.githubusercontent.com/PipettingBeaver/Vorsum/refs/heads/main/CHANGELOG.md';
   const CHANGELOG_CACHE_KEY = 'vorsum_changelog_cache';
   const CHANGELOG_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
   const LAST_SEEN_VERSION_KEY = 'vorsum_last_seen_version';
   let whatsNewNoticeEl = null;
+
+  function parseChangelogMarkdown(text) {
+    const entries = [];
+    let current = null;
+    for (const line of String(text || '').split(/\r?\n/)) {
+      const h = line.match(/^##\s+([\w.]+)\s*-\s*(\d{4}-\d{2}-\d{2})\s*(\(highlight\))?\s*$/i);
+      if (h) {
+        current = { version: h[1], date: h[2], highlight: !!h[3], changes: [] };
+        entries.push(current);
+        continue;
+      }
+      if (!current) continue;
+      const b = line.match(/^\s*[-*]\s+(.+)$/);
+      if (b) current.changes.push(b[1].trim());
+    }
+    return entries;
+  }
 
   function getCachedChangelog() {
     const cache = GM_getValue(CHANGELOG_CACHE_KEY, null);
@@ -510,15 +530,11 @@
             resolve(cache ? cache.data : null);
             return;
           }
-          try {
-            const data = JSON.parse(res.responseText);
-            if (Array.isArray(data)) {
-              GM_setValue(CHANGELOG_CACHE_KEY, { fetchedAt: Date.now(), data });
-              resolve(data);
-            } else {
-              resolve(cache ? cache.data : null);
-            }
-          } catch (e) {
+          const data = parseChangelogMarkdown(res.responseText);
+          if (data.length) {
+            GM_setValue(CHANGELOG_CACHE_KEY, { fetchedAt: Date.now(), data });
+            resolve(data);
+          } else {
             resolve(cache ? cache.data : null);
           }
         },
@@ -545,6 +561,13 @@
       if (!entry) {
         addModalParagraph(body, 'No changelog details are available right now (offline or not published yet).');
       } else {
+        if (entry.date) {
+          const d = document.createElement('div');
+          d.textContent = entry.date;
+          d.className = 'vorsum-label';
+          d.style.cssText = 'font-size:11px !important;margin:-4px 0 8px';
+          body.appendChild(d);
+        }
         const ul = document.createElement('ul');
         ul.style.cssText = 'margin:0 0 12px;padding-left:18px';
         (entry.changes || []).forEach((c) => {
@@ -567,10 +590,10 @@
     });
   }
 
-  // Full history, newest first, in a wider modal.
+  // Full history, newest first (the file is already newest-first), wider modal.
   function openFullChangelog() {
     fetchChangelog(true).then((data) => {
-      const entries = Array.isArray(data) ? data.slice().reverse() : [];
+      const entries = Array.isArray(data) ? data : [];
       showSimpleModal(
         'Change log',
         (body) => {
@@ -579,7 +602,7 @@
           } else {
             entries.forEach((entry) => {
               const h = document.createElement('div');
-              h.textContent = `v${entry.version}`;
+              h.textContent = `v${entry.version}${entry.date ? ` - ${entry.date}` : ''}`;
               h.style.cssText = 'font-weight:bold;margin:12px 0 4px';
               body.appendChild(h);
               const ul = document.createElement('ul');
@@ -597,7 +620,7 @@
           link.href = CHANGELOG_RAW_URL;
           link.target = '_blank';
           link.rel = 'noopener noreferrer';
-          link.textContent = 'Open changelog.json';
+          link.textContent = 'Open CHANGELOG.md';
           link.className = 'vorsum-history-title';
           link.style.cssText = 'text-decoration:underline;display:inline-block;margin-top:10px';
           registerThemedEl(link);
@@ -609,7 +632,7 @@
   }
 
   // One-time, dismissible in-panel banner when the running version is newer
-  // than the last one seen and is flagged `highlight` in changelog.json.
+  // than the last one seen and is flagged `(highlight)` in CHANGELOG.md.
   function showWhatsNewBanner(entry) {
     if (!whatsNewNoticeEl) return;
     whatsNewNoticeEl.replaceChildren();
