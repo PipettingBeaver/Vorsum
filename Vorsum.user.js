@@ -2,7 +2,7 @@
 // @name         Vorsum - Youtube Summary Button
 // @namespace    https://github.com/PipettingBeaver/Vorsum
 // @icon         https://s.ytimg.com/yts/img/favicon_32-vflWoMFGx.png
-// @version      1.1.4
+// @version      1.1.5
 // @description  Adds a click-to-summarize button to YouTube grid cards. Two modes: caption-transcript or direct-URL (Gemini watches the video itself). Beginner friendly and includes a tutorial.
 // @match        https://www.youtube.com/*
 // @grant        GM_xmlhttpRequest
@@ -970,11 +970,11 @@
         transition: transform 0.12s ease, box-shadow 0.12s ease;
       }
       #vorsum-widget-dot:hover {
-        transform: scale(1.08);
+        transform: scale(1.1);
         box-shadow: 0 3px 10px rgba(0,0,0,0.45) !important;
       }
       #vorsum-widget-dot:active {
-        transform: scale(0.94);
+        transform: scale(0.92);
       }
       /* Embedded-player ∑ button: same grow/squash feedback. */
       #vorsum-embed-btn:hover {
@@ -3257,7 +3257,11 @@
   // Stamps the shared position onto BOTH the dot and the panel, so they are
   // always the same top-right corner. Called on drag and on (re)build.
   function applyWidgetPosition() {
-    const pos = getWidgetPos();
+    const stored = getWidgetPos();
+    const pos = clampWidgetPos(stored.right, stored.top);
+    if (pos.right !== stored.right || pos.top !== stored.top) {
+      setWidgetPos(pos.right, pos.top); // keep storage in-bounds too
+    }
     const right = `${pos.right}px`;
     const top = `${pos.top}px`;
     if (widgetPanelEl) {
@@ -3278,13 +3282,17 @@
     }
   }
 
-  // Keeps the top-right corner on-screen (with a small margin) so the dot or
-  // the panel's minimize/drag region can always be reached again, even if
-  // the user drags it toward an edge or the window shrinks.
+  // Keeps the WHOLE widget on-screen. Clamps against whichever element is
+  // visible (the dot when collapsed, the panel when expanded) - the old
+  // version clamped to the viewport size only, ignoring the element's own
+  // width/height, which let the dot be dragged most of the way off the left
+  // and bottom edges.
   function clampWidgetPos(right, top) {
-    const m = 12;
-    const maxRight = Math.max(m, window.innerWidth - m);
-    const maxTop = Math.max(m, window.innerHeight - m);
+    const el = getWidgetCollapsed() ? widgetDotEl : widgetPanelEl;
+    const w = (el && el.offsetWidth) || 44;
+    const h = (el && el.offsetHeight) || 44;
+    const maxRight = Math.max(0, window.innerWidth - w);
+    const maxTop = Math.max(0, window.innerHeight - h);
     return {
       right: Math.min(Math.max(right, 0), maxRight),
       top: Math.min(Math.max(top, 0), maxTop)
@@ -4498,6 +4506,9 @@
         const showing = summaryEl.style.display !== 'none';
         summaryEl.style.display = showing ? 'none' : 'block';
         viewBtn.title = showing ? 'View summary' : 'Hide summary';
+        // Bold ∑ while this entry's summary is expanded - same reactive cue
+        // the on-page/embed buttons use.
+        viewBtn.style.fontWeight = showing ? 'normal' : 'bold';
       });
 
       const delBtn = document.createElement('button');
@@ -4753,6 +4764,10 @@
     widgetPanelEl = panel;
     widgetDotEl = dot;
     applyWidgetPosition();
+
+    // Re-clamp on resize so the widget can't end up off-screen after the
+    // window shrinks.
+    window.addEventListener('resize', applyWidgetPosition);
 
     if (getWidgetCollapsed()) collapse();
 
@@ -6104,7 +6119,7 @@
     // while busy/erroring (setButtonState writes "∑ - …" labels).
     btn.style.cssText =
       'position:fixed;top:50px;right:10px;z-index:2147483647;min-width:32px;height:32px;border-radius:16px;' +
-      'padding:0 9px;display:flex;align-items:center;justify-content:center;font-size:15px !important;font-weight:bold;' +
+      'padding:0 9px;display:flex;align-items:center;justify-content:center;font-size:15px !important;font-weight:normal;' +
       'cursor:pointer;border-width:1px;border-style:solid;box-shadow:0 2px 6px rgba(0,0,0,0.4);' +
       'white-space:nowrap;overflow:hidden;opacity:0;pointer-events:none;' +
       'transition:opacity 0.15s ease,transform 0.12s ease';
@@ -6385,7 +6400,7 @@
       'height:36px',
       'margin-right:8px',
       'font-size:14px !important',
-      'font-weight:bold',
+      'font-weight:normal',
       'border-width:1px',
       'border-style:solid',
       'border-radius:18px',
@@ -6586,7 +6601,11 @@
     const idleGlyph = isTranscriptBtn ? 'T' : '\u2211';
 
     const isIdle = label === idleLabel;
-    btn.textContent = isIdle ? idleGlyph : `${idleGlyph} - ${label}`;
+    // "Hide summary" is the open state: keep the plain glyph and signal it
+    // with bold weight instead of appending " - Hide summary".
+    const isOpen = label === 'Hide summary';
+    btn.textContent = isIdle || isOpen ? idleGlyph : `${idleGlyph} - ${label}`;
+    btn.style.fontWeight = isOpen ? 'bold' : 'normal';
     btn.setAttribute('aria-label', label);
     btn.disabled = !!disabled;
     btn.dataset.vorsumActive = isIdle ? 'false' : 'true';

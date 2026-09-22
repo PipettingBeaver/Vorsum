@@ -71,5 +71,13 @@
       "The 'Show transcript download T' option now toggles live without a page reload.",
       "Added a Change log button in Options and widened the Data & Privacy popup."
     ]
+  },
+  {
+    "version": "1.1.5",
+    "highlight": false,
+    "changes": [
+      "The Σ button now shows a bold Σ while a summary is open (instead of '∑ - Hide summary'), on pages, watch pages, and embeds, and in History.",
+      "The floating dot is now kept fully on-screen when dragged (and after a window resize), and its hover/press scale is a bit more noticeable."
+    ]
   }
 ]
