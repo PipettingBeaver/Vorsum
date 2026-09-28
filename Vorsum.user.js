@@ -2,7 +2,7 @@
 // @name         Vorsum - Youtube Summary Button
 // @namespace    https://github.com/PipettingBeaver/Vorsum
 // @icon         https://s.ytimg.com/yts/img/favicon_32-vflWoMFGx.png
-// @version      1.1.6
+// @version      1.1.7
 // @description  Adds a click-to-summarize button to YouTube grid cards. Two modes: caption-transcript or direct-URL (Gemini watches the video itself). Beginner friendly and includes a tutorial.
 // @match        https://www.youtube.com/*
 // @grant        GM_xmlhttpRequest
@@ -482,11 +482,13 @@
   }
 
   // ---- Changelog / "What's new" ----
-  // CHANGELOG.md lives on the repo (readable on GitHub) and is also the app's
-  // data source; fetched lazily (only when the version changed and the cache
-  // is stale, or on demand) and cached in GM storage - never bundled, never on
-  // a fixed interval. Format (kept strict so parsing stays reliable):
-  //   ## <version> - <YYYY-MM-DD> [(highlight)]
+  // CHANGELOG.md lives on the repo (Keep a Changelog format, readable on
+  // GitHub) and is also the app's data source; fetched lazily (only when the
+  // version changed and the cache is stale, or on demand) and cached in GM
+  // storage - never bundled, never on a fixed interval. Parsed shape:
+  //   ## [<version>] - <YYYY-MM-DD>   (or "## [Unreleased]")
+  //   <!-- highlight -->              (optional, marks a banner-worthy release)
+  //   ### Added|Changed|Fixed|...     (ignored - bullets are collected flat)
   //   - change
   const CHANGELOG_RAW_URL = 'https://raw.githubusercontent.com/PipettingBeaver/Vorsum/refs/heads/main/CHANGELOG.md';
   const CHANGELOG_CACHE_KEY = 'vorsum_changelog_cache';
@@ -498,13 +500,21 @@
     const entries = [];
     let current = null;
     for (const line of String(text || '').split(/\r?\n/)) {
-      const h = line.match(/^##\s+([\w.]+)\s*-\s*(\d{4}-\d{2}-\d{2})\s*(\(highlight\))?\s*$/i);
+      const h = line.match(/^##\s+\[?([\w.]+)\]?\s*(?:-\s*(\d{4}-\d{2}-\d{2}))?\s*$/);
       if (h) {
-        current = { version: h[1], date: h[2], highlight: !!h[3], changes: [] };
+        if (h[1].toLowerCase() === 'unreleased') {
+          current = null; // no date; not a released version
+          continue;
+        }
+        current = { version: h[1], date: h[2] || null, highlight: false, changes: [] };
         entries.push(current);
         continue;
       }
       if (!current) continue;
+      if (/<!--\s*highlight\s*-->/i.test(line)) {
+        current.highlight = true;
+        continue;
+      }
       const b = line.match(/^\s*[-*]\s+(.+)$/);
       if (b) current.changes.push(b[1].trim());
     }
@@ -632,7 +642,8 @@
   }
 
   // One-time, dismissible in-panel banner when the running version is newer
-  // than the last one seen and is flagged `(highlight)` in CHANGELOG.md.
+  // than the last one seen and is flagged with `<!-- highlight -->` in
+  // CHANGELOG.md.
   function showWhatsNewBanner(entry) {
     if (!whatsNewNoticeEl) return;
     whatsNewNoticeEl.replaceChildren();
